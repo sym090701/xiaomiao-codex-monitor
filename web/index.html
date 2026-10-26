@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Codex Display Console</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090c12;
+      --panel: rgba(22, 27, 39, .84);
+      --line: #293348;
+      --text: #eef4ff;
+      --muted: #8d99ae;
+      --accent: #4ce0b3;
+      --danger: #ff7a8a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 15% 0, rgba(76, 224, 179, .12), transparent 34rem),
+        radial-gradient(circle at 95% 15%, rgba(95, 125, 255, .14), transparent 30rem),
+        var(--bg);
+      color: var(--text);
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    }
+    main { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 42px 0 64px; }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+    h1 { margin: 0; font-size: clamp(28px, 5vw, 48px); letter-spacing: -.04em; }
+    .eyebrow { margin: 0 0 8px; color: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+    .subtle { color: var(--muted); }
+    .status-pill { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); white-space: nowrap; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 12px currentColor; }
+    .dot.online { background: var(--accent); }
+    .grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 18px; }
+    .panel { border: 1px solid var(--line); border-radius: 18px; background: var(--panel); backdrop-filter: blur(18px); overflow: hidden; }
+    .panel-head { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+    h2 { margin: 0; font-size: 17px; }
+    .panel-body { padding: 20px; }
+    .metrics { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    .metric { padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: rgba(8, 11, 18, .45); }
+    .metric span { display: block; color: var(--muted); font-size: 12px; }
+    .metric strong { display: block; margin-top: 7px; font-size: 26px; letter-spacing: -.03em; }
+    form { display: grid; gap: 18px; }
+    .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
+    input, select, button { font: inherit; }
+    input, select { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid #354159; border-radius: 10px; background: #0b1019; color: var(--text); }
+    input[type="color"] { padding: 5px; cursor: pointer; }
+    .switch { display: flex; align-items: center; justify-content: space-between; min-height: 42px; padding: 9px 11px; border: 1px solid #354159; border-radius: 10px; background: #0b1019; }
+    .switch input { width: auto; min-height: auto; accent-color: var(--accent); }
+    .preset-row { display: flex; flex-wrap: wrap; gap: 8px; }
+    button { border: 0; border-radius: 10px; padding: 10px 14px; background: var(--accent); color: #06130f; font-weight: 750; cursor: pointer; }
+    button.secondary { border: 1px solid #354159; background: #151c29; color: var(--text); font-weight: 600; }
+    button:disabled { opacity: .5; cursor: wait; }
+    .notice { min-height: 24px; margin-top: 10px; color: var(--accent); }
+    .timeline { display: grid; gap: 11px; }
+    .timeline div { display: flex; justify-content: space-between; gap: 14px; padding-bottom: 11px; border-bottom: 1px solid var(--line); }
+    .timeline div:last-child { border: 0; padding: 0; }
+    @media (max-width: 780px) {
+      main { padding-top: 26px; }
+      header { align-items: start; flex-direction: column; }
+      .grid { grid-template-columns: 1fr; }
+      .field-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">ESP32 · WebSocket Control</p>
+        <h1>Codex Display Console</h1>
+        <p class="subtle">15 秒刷新用量，5 秒向设备推送；屏幕状态变化即时通知。</p>
+      </div>
+      <div class="status-pill"><span id="deviceDot" class="dot"></span><span id="deviceStatus">设备离线</span></div>
+    </header>
+
+    <div class="grid">
+      <div>
+        <section class="panel">
+          <div class="panel-head"><h2>实时状态</h2><span id="screenState" class="subtle">读取中</span></div>
+          <div class="panel-body metrics">
+            <div class="metric"><span>5 小时已用</span><strong id="fiveHour">--</strong></div>
+            <div class="metric"><span>本周已用</span><strong id="weekly">--</strong></div>
+            <div class="metric"><span>CPU</span><strong id="cpu">--</strong></div>
+            <div class="metric"><span>内存</span><strong id="memory">--</strong></div>
+            <div id="ambientLuxMetric" class="metric"><span>环境照度</span><strong id="ambientLux">--</strong></div>
+            <div class="metric"><span>背光亮度</span><strong id="backlight">--</strong></div>
+            <div class="metric"><span>Codex 状态</span><strong id="codexState">已停止</strong></div>
+          </div>
+        </section>
+
+        <section class="panel" style="margin-top:18px">
+          <div class="panel-head"><h2>同步节奏</h2><span class="subtle">服务端缓存</span></div>
+          <div class="panel-body timeline">
+            <div><span class="subtle">Codex API 刷新</span><strong id="usageCadence">15 秒</strong></div>
+            <div><span class="subtle">WebSocket 推送</span><strong id="pushCadence">5 秒</strong></div>
+            <div><span class="subtle">设备最后上报</span><strong id="lastSeen">--</strong></div>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel">
+        <div class="panel-head"><h2>显示设置</h2><span class="subtle">通过 WebSocket 下发</span></div>
+        <div class="panel-body">
+          <form id="configForm">
+            <div class="field-grid">
+              <label>显示模式
+                <select name="display_mode"><option value="0">Codex 用量</option><option value="1">系统性能</option></select>
+              </label>
+              <label>内存指标
+                <select name="memory_metric"><option value="0">内存使用率</option><option value="1">内存压力</option></select>
+              </label>
+              <label>屏幕方向
+                <select name="screen_flipped"><option value="false">正常</option><option value="true">上下翻转</option></select>
+              </label>
+              <label>跟随 Mac 屏幕
+                <span class="switch">同步亮灭 <input name="follow_host_screen" type="checkbox" checked></span>
+              </label>
+              <label id="backlightControl" hidden>ESP 背光亮度
+                <span class="switch">
+                  <input name="backlight_brightness" type="range" min="1" max="100" step="1" value="100">
+                  <strong id="backlightBrightnessValue">100%</strong>
+                </span>
+              </label>
+            </div>
+
+            <div>
+              <label style="margin-bottom:8px">主题预设</label>
+              <div class="preset-row">
+                <button type="button" class="secondary" data-preset="ocean">深海</button>
+                <button type="button" class="secondary" data-preset="cyber">霓虹</button>
+                <button type="button" class="secondary" data-preset="sunset">日落</button>
+                <button type="button" class="secondary" data-preset="mono">黑白</button>
+              </div>
+            </div>
+
+            <div class="field-grid" id="colors">
+              <label>背景<input name="performance_background" type="color"></label>
+              <label>CPU<input name="performance_cpu_color" type="color"></label>
+              <label>内存<input name="performance_memory_color" type="color"></label>
+              <label>磁盘<input name="performance_disk_color" type="color"></label>
+              <label>负载<input name="performance_load_color" type="color"></label>
+              <label>下载<input name="performance_rx_color" type="color"></label>
+              <label>上传<input name="performance_tx_color" type="color"></label>
+            </div>
+
+            <div>
+              <label style="margin-bottom:8px">Codex 状态条</label>
+              <label>工作动画
+                <select name="codex_working_animation">
+                  <option value="1">单色流光</option>
+                  <option value="2">彩色光带</option>
+                </select>
+              </label>
+              <div class="field-grid">
+                <label>等待授权 · 呼吸<input name="codex_permission_color" type="color"></label>
+                <label>工作颜色 · 单色流光<input name="codex_working_color" type="color"></label>
+                <label>任务停止 · 常亮<input name="codex_stop_color" type="color"></label>
+              </div>
+            </div>
+          </form>
+          <div id="notice" class="notice" role="status"></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const form = document.querySelector("#configForm");
+    const field = name => form.elements.namedItem(name);
+    const presets = {
+      ocean: ["#080a10", "#37d1b0", "#77dc57", "#ffc440", "#66e1bd", "#37d1b0", "#77dc57"],
+      cyber: ["#12081c", "#00f5d4", "#f15bb5", "#fee440", "#9b5de5", "#00bbf9", "#f15bb5"],
+      sunset: ["#160b0b", "#ff6b6b", "#ffd166", "#f8961e", "#f3722c", "#43aa8b", "#4d96ff"],
+      mono: ["#080808", "#ffffff", "#d9d9d9", "#b8b8b8", "#e8e8e8", "#cfcfcf", "#afafaf"]
+    };
+    const colorNames = ["performance_background", "performance_cpu_color", "performance_memory_color", "performance_disk_color", "performance_load_color", "performance_rx_color", "performance_tx_color"];
+    const codexColorDefaults = {
+      codex_permission_color: "#ffb020",
+      codex_working_color: "#4f8cff",
+      codex_stop_color: "#4ce0b3"
+    };
+    const percent = value => value == null ? "--" : `${Math.round(value)}%`;
+
+    document.querySelectorAll("[data-preset]").forEach(button => button.addEventListener("click", () => {
+      colorNames.forEach((name, index) => field(name).value = presets[button.dataset.preset][index]);
+      scheduleConfigPush();
+    }));
+
+    function applyConfig(config) {
+      const defaults = { display_mode: 0, memory_metric: 0, screen_flipped: false, follow_host_screen: true, backlight_brightness: 100, codex_working_animation: 1 };
+      config = { ...defaults, ...config };
+      field("display_mode").value = String(config.display_mode);
+      field("memory_metric").value = String(config.memory_metric);
+      field("screen_flipped").value = String(Boolean(config.screen_flipped));
+      field("follow_host_screen").checked = Boolean(config.follow_host_screen);
+      field("backlight_brightness").value = String(Number(config.backlight_brightness) || 100);
+      document.querySelector("#backlightBrightnessValue").textContent = `${field("backlight_brightness").value}%`;
+      field("codex_working_animation").value = String(Number(config.codex_working_animation) === 2 ? 2 : 1);
+      colorNames.forEach((name, index) => field(name).value = config[name] || presets.ocean[index]);
+      Object.entries(codexColorDefaults).forEach(([name, value]) => field(name).value = config[name] || value);
+    }
+
+    function render(state) {
+      const devices = Object.values(state.devices || {});
+      const device = devices.find(item => item.connected) || devices[0];
+      const online = Boolean(device?.connected);
+      document.querySelector("#deviceDot").classList.toggle("online", online);
+      document.querySelector("#deviceStatus").textContent = online ? "设备在线" : "设备离线";
+      document.querySelector("#screenState").textContent = state.screen?.screen_on ? "Mac 屏幕亮" : "Mac 屏幕已熄灭";
+      document.querySelector("#fiveHour").textContent = percent(state.usage?.five_hour?.used_percent);
+      document.querySelector("#weekly").textContent = percent(state.usage?.weekly?.used_percent);
+      document.querySelector("#cpu").textContent = percent(state.performance?.cpu_percent);
+      document.querySelector("#memory").textContent = percent(state.performance?.memory_percent);
+      const message = device?.message || {};
+      const hasLightSensor = message.has_light_sensor ?? device?.config?.has_light_sensor;
+      const canAdjustBacklight = hasLightSensor === false;
+      document.querySelector("#ambientLuxMetric").hidden = canAdjustBacklight;
+      document.querySelector("#backlightControl").hidden = !canAdjustBacklight;
+      field("backlight_brightness").disabled = !canAdjustBacklight;
+      document.querySelector("#ambientLux").textContent = message.ambient_lux == null ? "--" : `${Math.round(message.ambient_lux)} lux`;
+      document.querySelector("#backlight").textContent = percent(message.backlight_percent);
+      const codexLabels = { working: "正在工作", permission: "等待授权", stopped: "已停止" };
+      const activeConversations = Number(state.codex?.active_conversations || 0);
+      const codexLabel = codexLabels[state.codex?.state] || "未知";
+      document.querySelector("#codexState").textContent = activeConversations > 1
+        ? `${codexLabel}（${activeConversations} 个对话）`
+        : codexLabel;
+      document.querySelector("#usageCadence").textContent = `${state.usage_refresh_seconds} 秒`;
+      document.querySelector("#pushCadence").textContent = `${state.push_interval_seconds} 秒`;
+      document.querySelector("#lastSeen").textContent = device?.last_seen || "--";
+      // Keep server-side values for fields that older firmware does not report yet.
+      const actual = { ...(state.desired_config || {}), ...(device?.config || {}) };
+      if (!form.dataset.dirty) applyConfig(actual);
+    }
+
+    async function refresh() {
+      const response = await fetch("/api/state", { cache: "no-store" });
+      if (!response.ok) throw new Error("状态读取失败");
+      render(await response.json());
+    }
+
+    let pushTimer;
+    let pushRevision = 0;
+
+    function scheduleConfigPush() {
+      form.dataset.dirty = "true";
+      const revision = ++pushRevision;
+      clearTimeout(pushTimer);
+      document.querySelector("#notice").textContent = "等待同步…";
+      pushTimer = setTimeout(() => pushConfig(revision), 300);
+    }
+
+    async function pushConfig(revision) {
+      const payload = Object.fromEntries(new FormData(form));
+      payload.display_mode = Number(payload.display_mode);
+      payload.memory_metric = Number(payload.memory_metric);
+      payload.codex_working_animation = Number(payload.codex_working_animation);
+      if (payload.backlight_brightness != null) {
+        payload.backlight_brightness = Number(payload.backlight_brightness);
+      }
+      payload.screen_flipped = payload.screen_flipped === "true";
+      payload.follow_host_screen = field("follow_host_screen").checked;
+      document.querySelector("#notice").textContent = "正在同步到 ESP32…";
+      try {
+        const response = await fetch("/api/device/config", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "保存失败");
+        if (revision === pushRevision) {
+          document.querySelector("#notice").textContent = result.connected_devices ? "已同步到 ESP32" : "已保存，设备上线后自动同步";
+          delete form.dataset.dirty;
+        }
+      } catch (error) {
+        if (revision === pushRevision) document.querySelector("#notice").textContent = `同步失败：${error.message}`;
+      }
+    }
+
+    form.addEventListener("change", scheduleConfigPush);
+    field("backlight_brightness").addEventListener("input", event => {
+      document.querySelector("#backlightBrightnessValue").textContent = `${event.target.value}%`;
+      scheduleConfigPush();
+    });
+    form.addEventListener("submit", event => event.preventDefault());
+
+    applyConfig({});
+    refresh().catch(error => document.querySelector("#notice").textContent = error.message);
+    setInterval(() => refresh().catch(() => {}), 5000);
+  </script>
+</body>
+</html>
