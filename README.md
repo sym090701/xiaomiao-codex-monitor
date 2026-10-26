@@ -58,6 +58,9 @@ pio run -e xiaomiao
 
 ## 安装并运行 Mac 服务
 
+希望 Mac 休眠后仍可查询用量，可以使用 [Ubuntu 常开采集服务](deploy/README.md)。
+该模式通过 Codex App Server 查询，现有小喵固件可直接连接其 WebSocket 端口。
+
 需要 macOS、Python 3.10 或更新版本，以及已经登录 Codex 的本机环境。服务端从 `~/.codex/auth.json` 读取登录令牌，只在 Mac 上调用 Codex 用量接口。
 
 ```bash

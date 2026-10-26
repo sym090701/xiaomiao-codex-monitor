@@ -1,0 +1,23 @@
+[Unit]
+Description=XiaoMiao Codex quota collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=xiaomiao-quota
+Group=xiaomiao-quota
+WorkingDirectory=/opt/xiaomiao-quota
+Environment=HOME=/var/lib/xiaomiao-quota
+Environment=CODEX_HOME=/var/lib/xiaomiao-quota/.codex
+ExecStart=/opt/xiaomiao-quota/.venv/bin/python /opt/xiaomiao-quota/quota_server.py --host 192.168.1.153 --port 8765 --codex /opt/xiaomiao-quota/bin/codex
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/xiaomiao-quota
+
+[Install]
+WantedBy=multi-user.target
