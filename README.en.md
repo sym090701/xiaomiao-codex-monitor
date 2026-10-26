@@ -46,6 +46,14 @@ Do not write this application image at `0x0` or `0x10000`. The port is build-ver
 
 ## Build
 
+Two build variants are available: `xiaomiao` (web provisioning) and
+`xiaomiao_preconfigured` (private `device.local.json`, multiple Wi-Fi networks).
+Use `python3 scripts/build_xiaomiao.py --configure` for an interactive setup and build.
+Private BINs contain Wi-Fi credentials and must never be published.
+See [configuration and Mac relay instructions](docs/CONFIGURATION.md).
+The Ubuntu collector now accepts authenticated Mac performance uploads; after 45 seconds
+without a heartbeat it reports the Mac offline while continuing Codex quota collection.
+
 Install PlatformIO Core, then run:
 
 ```bash
@@ -65,7 +73,7 @@ python3 -m venv .venv
 HOST=192.168.1.20 PORT=8080 PYTHON_BIN="$PWD/.venv/bin/python" ./server.sh start
 ```
 
-Replace `192.168.1.20` with the Mac's current LAN address. Keep the Mac and XiaoMiao on the same trusted network, and allow the port through the local firewall. Open <http://127.0.0.1:8080> on the Mac for the dashboard. Stop the service with `./server.sh stop`.
+Replace `192.168.1.20` with the Mac's current LAN address. Keep the Mac and XiaoMiao on the same trusted network, and allow the port through the local firewall. Open `http://<Mac-LAN-IP>:8080` on the Mac for the dashboard, matching the HOST binding. Stop the service with `./server.sh stop`.
 
 The service API has no device authentication. Do not expose it to the public Internet or configure router port forwarding. Never commit `auth.json`, runtime logs, local settings, or Wi-Fi credentials.
 

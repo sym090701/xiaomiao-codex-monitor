@@ -13,6 +13,9 @@
 
 ## 功能
 
+提供 [网页配网与编译预配置两种方式](docs/CONFIGURATION.md)，支持多个备用 Wi-Fi。
+Ubuntu 可持续采集额度，Mac agent 将 Mac 性能上报至同一服务器；Mac 休眠后性能页显示离线，额度继续更新。
+
 - 显示 Codex 5 小时、每周剩余百分比和重置倒计时。
 - A 键切换 Codex 用量页与 Mac CPU、内存、磁盘、负载和网络页。
 - B 键让设备重新连接电脑端服务；长按 A+B 约 1.5 秒返回 Launcher。
@@ -76,7 +79,7 @@ HOST=192.168.1.20 PORT=8080 PYTHON_BIN="$PWD/.venv/bin/python" ./server.sh start
 ./server.sh stop
 ```
 
-Mac 浏览器打开 <http://127.0.0.1:8080> 查看状态面板。首次交互式启动会询问是否安装 Codex Hook；Hook 是可选的，只用于显示当前 Codex 会话状态，不参与用量读取。检查或移除 Hook 可运行 `./server.sh hook-status` 或 `./server.sh uninstall-hook`。
+Mac 浏览器打开 `http://Mac的局域网IP:8080` 查看状态面板（与上面的 HOST 一致）。首次交互式启动会询问是否安装 Codex Hook；Hook 是可选的，只用于显示当前 Codex 会话状态，不参与用量读取。检查或移除 Hook 可运行 `./server.sh hook-status` 或 `./server.sh uninstall-hook`。
 
 服务接口没有设备认证。只在可信的家庭/个人局域网使用；不要绑定公网网卡、配置路由器端口转发或把 8080 暴露到互联网。不要把 `auth.json`、日志、运行配置或 Wi-Fi 凭据提交到仓库。
 

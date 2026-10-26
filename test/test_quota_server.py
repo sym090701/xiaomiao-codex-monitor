@@ -32,6 +32,31 @@ class QuotaServerTest(unittest.TestCase):
 
 
 class TransportTest(unittest.IsolatedAsyncioTestCase):
+    async def test_mac_auth_validation_and_expiry(self):
+        collector = Collector("unused", 60)
+        async def idle():
+            import asyncio
+            await asyncio.Future()
+        token = "test-fixture-only-not-a-real-token-000000"
+        metrics = {key: 1 for key in ("cpu_percent", "memory_percent", "memory_pressure_percent", "disk_percent",
+                   "cpu_count", "load_1", "net_rx_mbps", "net_tx_mbps", "uptime_seconds",
+                   "memory_used_gb", "memory_total_gb", "disk_used_gb", "disk_total_gb")}
+        metrics.update(ok=True, host_name="test-mac", account_token="must-be-dropped")
+        with patch.object(collector, "poll", idle):
+            async with TestClient(TestServer(create_app(collector, token))) as client:
+                response = await client.post("/api/mac/metrics", json=metrics)
+                self.assertEqual(response.status, 401)
+                headers = {"Authorization": "Bearer " + token}
+                response = await client.post("/api/mac/metrics", json=metrics, headers=headers)
+                self.assertEqual(response.status, 200)
+                self.assertTrue(collector.performance()["ok"])
+                self.assertNotIn("account_token", collector.performance())
+                with patch("quota_server.time.monotonic", return_value=collector.mac_seen + 46):
+                    self.assertFalse(collector.performance()["ok"])
+                invalid = {**metrics, "cpu_percent": 101}
+                response = await client.post("/api/mac/metrics", json=invalid, headers=headers)
+                self.assertEqual(response.status, 400)
+
     async def test_device_receives_snapshot_and_no_mac_metrics(self):
         collector = Collector("unused", 60)
         collector.payload = {"ok": True, "five_hour": None, "weekly": None}

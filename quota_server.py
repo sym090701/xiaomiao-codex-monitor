@@ -4,7 +4,9 @@ import asyncio
 import contextlib
 import copy
 import json
+import math
 import os
+import secrets
 import time
 
 from aiohttp import web
@@ -74,12 +76,40 @@ async def read_limits(binary):
                 await proc.wait()
 
 
+def validate_metrics(payload):
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        raise ValueError("Expected a successful metrics object")
+    out = {"ok": True}
+    for key in ("cpu_percent", "memory_percent", "memory_pressure_percent", "disk_percent",
+                "cpu_count", "load_1", "net_rx_mbps", "net_tx_mbps", "uptime_seconds",
+                "memory_used_gb", "memory_total_gb", "disk_used_gb", "disk_total_gb"):
+        value = payload.get(key)
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError("Missing or invalid metric: " + key)
+        if key.endswith("_percent") and value > 100:
+            raise ValueError("Percentage out of range")
+        out[key] = value
+    name = payload.get("host_name")
+    if not isinstance(name, str) or not name or len(name) > 100:
+        raise ValueError("Invalid host name")
+    out["host_name"] = name
+    return out
+
+
 class Collector:
     def __init__(self, binary, interval):
         self.binary, self.interval = binary, interval
         self.payload = {"ok": False, "error": "Quota warming up"}
         self.updated = None
         self.failed = False
+        self.mac_metrics = None
+        self.mac_seen = None
+
+    def performance(self):
+        if self.mac_seen is None or time.monotonic() - self.mac_seen > 45:
+            return {"ok": False, "error": "Mac offline / asleep", "stale": True}
+        return {**self.mac_metrics, "stale": False,
+                "age_seconds": int(time.monotonic() - self.mac_seen)}
 
     async def poll(self):
         while True:
@@ -103,16 +133,29 @@ class Collector:
             if window and isinstance(window.get("reset_at_epoch"), (int, float)):
                 window["reset_after_seconds"] = max(0, int(window["reset_at_epoch"] - time.time()))
         return {"type": "snapshot", "screen_on": True, "usage": usage,
-                "performance": {"ok": False, "error": "Mac metrics unavailable in server mode"},
+                "performance": self.performance(),
                 "codex": {"state": "stopped"}}
 
 
-def create_app(collector):
-    app = web.Application()
+def create_app(collector, ingest_token=None):
+    app = web.Application(client_max_size=8192)
     async def usage(_request):
         return web.json_response(collector.snapshot()["usage"])
     async def health(_request):
-        return web.json_response({"service": "xiaomiao-quota", "quota_ok": collector.snapshot()["usage"]["ok"]})
+        return web.json_response({"service": "xiaomiao-quota", "quota_ok": collector.snapshot()["usage"]["ok"],
+                                  "mac_online": collector.performance()["ok"]})
+    async def ingest(request):
+        if not ingest_token:
+            raise web.HTTPServiceUnavailable(text="Mac ingest not configured")
+        auth = request.headers.get("Authorization", "")
+        if not secrets.compare_digest(auth.encode(), ("Bearer " + ingest_token).encode()):
+            raise web.HTTPUnauthorized(text="Unauthorized")
+        try:
+            metrics = validate_metrics(await request.json())
+        except (ValueError, TypeError):
+            raise web.HTTPBadRequest(text="Invalid metrics")
+        collector.mac_metrics, collector.mac_seen = metrics, time.monotonic()
+        return web.json_response({"ok": True})
     async def websocket(request):
         ws = web.WebSocketResponse(heartbeat=20)
         await ws.prepare(request)
@@ -139,6 +182,7 @@ def create_app(collector):
     app.router.add_get("/health", health)
     app.router.add_get("/usage", usage)
     app.router.add_get("/ws", websocket)
+    app.router.add_post("/api/mac/metrics", ingest)
     return app
 
 
@@ -151,4 +195,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.interval < 30:
         parser.error("interval must be at least 30 seconds")
-    web.run_app(create_app(Collector(args.codex, args.interval)), host=args.host, port=args.port)
+    token_file = os.environ.get("QUOTA_INGEST_TOKEN_FILE")
+    token = None
+    if token_file:
+        from pathlib import Path
+        token = Path(token_file).read_text().strip()
+        if len(token) < 32:
+            parser.error("Mac ingest token must be at least 32 characters")
+    web.run_app(create_app(Collector(args.codex, args.interval), token), host=args.host, port=args.port)

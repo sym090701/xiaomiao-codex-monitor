@@ -1,0 +1,8 @@
+{
+  "wifi_networks": [
+    {"ssid": "YOUR_WIFI_NAME", "password": "YOUR_WIFI_PASSWORD"},
+    {"ssid": "YOUR_BACKUP_WIFI", "password": "YOUR_BACKUP_PASSWORD"}
+  ],
+  "server_host": "192.168.1.153",
+  "server_port": 8765
+}

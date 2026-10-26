@@ -32,6 +32,11 @@ io.github.xiaomiao.codex-monitor.plist
 .DS_Store
 .env
 .env.*
+device.local.json
+mac-agent.local.json
+*.token
+dist-private/
+dist/
 !.env.example
 
 # Editors and operating systems

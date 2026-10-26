@@ -9,6 +9,9 @@
 #include <WebServer.h>
 #include <WebSocketsClient.h>
 #include <WiFi.h>
+#ifdef XM_PRECONFIGURED
+#include "xiaomiao_boot_config.h"
+#endif
 #ifdef XIAOMIAO
 #include <esp_ota_ops.h>
 #include "xiaomiao_page.h"
@@ -244,6 +247,8 @@ float resetProgress(const UsageWindow &window, uint32_t fallbackWindowSeconds) {
   return constrain(1.0f - float(window.resetAfterSeconds) / float(total), 0.0f, 1.0f);
 }
 
+void saveConfig();
+
 void loadConfig() {
   prefs.begin("codex", true);
   config.wifiSsid = prefs.getString("ssid", "");
@@ -278,6 +283,22 @@ void loadConfig() {
       prefs.getString("cx_stop", config.codexStopColor), config.codexStopColor);
   config.codexWorkingAnimation = prefs.getUChar("cx_anim", 1) == 2 ? 2 : 1;
   prefs.end();
+#ifdef XM_PRECONFIGURED
+  // Seed only when compiled network settings change. Web edits remain usable.
+  prefs.begin("xm_boot", true);
+  bool needsSeed = prefs.getString("revision", "") != XM_BOOT_REV;
+  prefs.end();
+  if (needsSeed) {
+    config.wifiSsid = XM_NETWORKS[0].ssid;
+    config.wifiPass = XM_NETWORKS[0].password;
+    config.usageHost = XM_BOOT_HOST;
+    config.usagePort = XM_BOOT_PORT;
+    saveConfig();
+    prefs.begin("xm_boot", false);
+    prefs.putString("revision", XM_BOOT_REV);
+    prefs.end();
+  }
+#endif
 }
 
 void saveConfig() {
@@ -448,6 +469,20 @@ void connectWifiIfNeeded() {
   }
 
   lastWifiAttemptMs = now;
+#ifdef XM_PRECONFIGURED
+  // Only use the compiled list while the saved SSID belongs to that list.
+  // A different SSID saved in the portal takes precedence.
+  bool compiledNetwork = false;
+  for (unsigned i = 0; i < XM_NETWORK_COUNT; ++i) {
+    if (config.wifiSsid == XM_NETWORKS[i].ssid) compiledNetwork = true;
+  }
+  if (compiledNetwork) {
+    static unsigned nextNetwork = 0;
+    const XmNetwork &network = XM_NETWORKS[nextNetwork++ % XM_NETWORK_COUNT];
+    WiFi.begin(network.ssid, network.password);
+    return;
+  }
+#endif
   WiFi.begin(config.wifiSsid.c_str(), config.wifiPass.c_str());
 }
 
@@ -533,6 +568,7 @@ void applyUsagePayload(JsonVariantConst doc) {
 void applyPerformancePayload(JsonVariantConst doc) {
   bool firstSample = !performance.ok;
   if (!doc["ok"].as<bool>()) {
+    performance.ok = false;
     performance.error = doc["error"] | "server error";
     return;
   }
