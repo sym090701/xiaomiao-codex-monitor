@@ -95,4 +95,4 @@ pio run -e xiaomiao
 
 ## 来源
 
-本项目的小喵适配基于 [evoking6/esp32-code-monitor](https://github.com/evoking6/esp32-code-monitor)，并保留其提交历史以呈现原作者贡献。完整基线和许可证状态见 [UPSTREAM.md](UPSTREAM.md)。
+本项目的小喵适配基于 [evoking6/esp32-code-monitor](https://github.com/evoking6/esp32-code-monitor)，公开仓库使用独立提交历史。完整来源、基线和许可证状态见 [UPSTREAM.md](UPSTREAM.md)。

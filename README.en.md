@@ -81,4 +81,4 @@ The service API has no device authentication. Do not expose it to the public Int
 
 Run `python3 -m unittest discover -s test -v` for offline companion tests. CI runs the tests and builds the firmware; this does not replace physical device validation.
 
-This XiaoMiao port is based on [evoking6/esp32-code-monitor](https://github.com/evoking6/esp32-code-monitor). Its source history is retained to represent upstream contributions. See [UPSTREAM.md](UPSTREAM.md) for the baseline and license status.
+This XiaoMiao port is based on [evoking6/esp32-code-monitor](https://github.com/evoking6/esp32-code-monitor). The public repository uses independent commit history. See [UPSTREAM.md](UPSTREAM.md) for source attribution, baseline, and license status.
