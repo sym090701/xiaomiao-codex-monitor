@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from machw_archive import MacHardwareArchive
+from machw_archive import CodexUsageArchive, MacHardwareArchive
 
 
 class MacHardwareArchiveTest(unittest.TestCase):
@@ -24,6 +24,17 @@ class MacHardwareArchiveTest(unittest.TestCase):
             archive = MacHardwareArchive(tempfile.mkdtemp())
             self.assertFalse(await archive.sync_once())
         asyncio.run(run())
+
+    def test_codex_usage_is_daily_nested_snapshot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            archive = CodexUsageArchive(folder)
+            archive.record({"ok": True, "five_hour": {"remaining_percent": 74}},
+                           captured_epoch=1793000000)
+            files = list(Path(folder).glob("*.ndjson"))
+            self.assertEqual(len(files), 1)
+            row = json.loads(files[0].read_text())
+            self.assertEqual(row["usage"]["five_hour"]["remaining_percent"], 74)
+            self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
 
 
 if __name__ == "__main__":

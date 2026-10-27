@@ -10,7 +10,7 @@ import secrets
 import time
 
 from aiohttp import web
-from machw_archive import MacHardwareArchive
+from machw_archive import CodexUsageArchive, MacHardwareArchive
 
 
 def normalize(result, now=None):
@@ -106,6 +106,7 @@ class Collector:
         self.mac_metrics = None
         self.mac_seen = None
         self.archive = MacHardwareArchive.from_env()
+        self.codex_archive = CodexUsageArchive.from_env()
 
     def performance(self):
         if self.mac_seen is None or time.monotonic() - self.mac_seen > 45:
@@ -116,8 +117,11 @@ class Collector:
     async def poll(self):
         while True:
             try:
-                self.payload = await read_limits(self.binary)
-                self.updated, self.failed = time.time(), False
+                fresh = await read_limits(self.binary)
+                captured = time.time()
+                self.payload = fresh
+                self.updated, self.failed = captured, False
+                self.codex_archive.record(fresh, captured)
             except (OSError, RuntimeError, ValueError, KeyError, asyncio.TimeoutError):
                 self.failed = True
             await asyncio.sleep(self.interval)
@@ -177,15 +181,18 @@ def create_app(collector, ingest_token=None):
         return ws
     async def lifetime(_app):
         task = asyncio.create_task(collector.poll())
-        sync_task = (asyncio.create_task(collector.archive.sync_loop())
-                     if collector.archive.enabled else None)
+        sync_tasks = []
+        if collector.archive.enabled:
+            sync_tasks.append(asyncio.create_task(collector.archive.sync_loop()))
+        if collector.codex_archive.enabled:
+            sync_tasks.append(asyncio.create_task(collector.codex_archive.sync_loop()))
         yield
         task.cancel()
-        if sync_task:
+        for sync_task in sync_tasks:
             sync_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-        if sync_task:
+        for sync_task in sync_tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await sync_task
     app.cleanup_ctx.append(lifetime)

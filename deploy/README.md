@@ -32,6 +32,12 @@ sudo -u xiaomiao-quota env HOME=/var/lib/xiaomiao-quota \
 没有 agent 或 45 秒未收到上报时显示 Mac 离线，不使用服务器负载代替 Mac 性能。
 Mac 休眠不会影响服务器继续查询，但服务器本身必须保持开机和联网。
 
+## Codex 用量趋势归档
+
+Codex 用量成功查询后，会另外追加到本地 `codexuselogs-spool/YYYY-MM-DD.ndjson`，
+并同步到 NAS 的 `/vol3/1000/512/codexuselogs/`。每行包含采集时间、5 小时窗口和
+周窗口的原始快照，适合后续用 DuckDB 或 Python 做趋势分析。查询失败不会写入伪造数据。
+
 ## Mac 硬件数据归档
 
 服务开启 `MACHWLOGS_LOCAL_DIR` 后，会把每次 Mac 上报追加到服务器本地
