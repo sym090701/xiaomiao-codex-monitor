@@ -20,6 +20,7 @@ Environment=CODEXLOGS_REMOTE=scall0p@192.168.1.158:/vol3/1000/512/codexuselogs
 Environment=CODEXLOGS_SSH_KEY=/var/lib/xiaomiao-quota/.ssh/machwlogs_sync_ed25519
 Environment=CODEXLOGS_KNOWN_HOSTS=/var/lib/xiaomiao-quota/.ssh/known_hosts
 Environment=CODEXLOGS_SYNC_INTERVAL=60
+Environment=ARCHIVE_TIMEZONE=Asia/Shanghai
 ExecStart=/opt/xiaomiao-quota/.venv/bin/python /opt/xiaomiao-quota/quota_server.py --host 192.168.1.153 --port 8765 --codex /opt/xiaomiao-quota/bin/codex
 Restart=on-failure
 RestartSec=10

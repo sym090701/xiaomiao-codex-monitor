@@ -35,8 +35,12 @@ Mac 休眠不会影响服务器继续查询，但服务器本身必须保持开�
 ## Codex 用量趋势归档
 
 Codex 用量成功查询后，会另外追加到本地 `codexuselogs-spool/YYYY-MM-DD.ndjson`，
-并同步到 NAS 的 `/vol3/1000/512/codexuselogs/`。每行包含采集时间、5 小时窗口和
-周窗口的原始快照，适合后续用 DuckDB 或 Python 做趋势分析。查询失败不会写入伪造数据。
+并同步到 NAS 的 `/vol3/1000/512/codexuselogs/`。新记录使用 `schema_version=2`，
+文件按 `Asia/Shanghai` 本地日期分区；每行包含 UTC 与本地时间、星期、周末标记、
+30 分钟槽位、`night/morning/afternoon/evening` 时段桶，以及 5 小时和周窗口的
+原始快照，适合长期按日、按星期和按时段分析。查询失败不会写入伪造数据。
+仓库提供 `scripts/migrate_archive_v1.py`，用于把早期没有时间维度的 JSONL 文件
+补齐到 v2；迁移会先生成 `.schema1.bak`，再原子替换原文件。
 
 ## Mac 硬件数据归档
 
