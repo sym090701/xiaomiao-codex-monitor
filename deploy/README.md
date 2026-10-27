@@ -32,6 +32,14 @@ sudo -u xiaomiao-quota env HOME=/var/lib/xiaomiao-quota \
 没有 agent 或 45 秒未收到上报时显示 Mac 离线，不使用服务器负载代替 Mac 性能。
 Mac 休眠不会影响服务器继续查询，但服务器本身必须保持开机和联网。
 
+## Mac 硬件数据归档
+
+服务开启 `MACHWLOGS_LOCAL_DIR` 后，会把每次 Mac 上报追加到服务器本地
+`mac/<主机名>/YYYY-MM-DD.ndjson`，并每分钟通过受限 SSH 密钥同步到 NAS 的
+`/vol3/1000/512/machwlogs/mac/`。服务器本地队列是数据源；NAS 短暂离线时只会
+积压，恢复后继续同步，不会阻塞小喵或改写 `512` 根目录权限。归档文件为 0600，
+目录为 0700。密钥只允许从 `192.168.1.153` 登录 NAS 的 `scall0p`，并关闭转发和终端。
+
 该版只用于可信私有局域网，接口无设备认证，不应转发至公网。
 公网 VPS 需要另行加入 HTTPS、设备认证与证书校验后使用。
 App Server 协议随 Codex 版本变化，升级前请运行本仓库测试。

@@ -10,6 +10,11 @@ WorkingDirectory=/opt/xiaomiao-quota
 Environment=HOME=/var/lib/xiaomiao-quota
 Environment=CODEX_HOME=/var/lib/xiaomiao-quota/.codex
 Environment=QUOTA_INGEST_TOKEN_FILE=/var/lib/xiaomiao-quota/mac-agent.token
+Environment=MACHWLOGS_LOCAL_DIR=/var/lib/xiaomiao-quota/machwlogs-spool
+Environment=MACHWLOGS_REMOTE=scall0p@192.168.1.158:/vol3/1000/512/machwlogs/mac
+Environment=MACHWLOGS_SSH_KEY=/var/lib/xiaomiao-quota/.ssh/machwlogs_sync_ed25519
+Environment=MACHWLOGS_KNOWN_HOSTS=/var/lib/xiaomiao-quota/.ssh/known_hosts
+Environment=MACHWLOGS_SYNC_INTERVAL=60
 ExecStart=/opt/xiaomiao-quota/.venv/bin/python /opt/xiaomiao-quota/quota_server.py --host 192.168.1.153 --port 8765 --codex /opt/xiaomiao-quota/bin/codex
 Restart=on-failure
 RestartSec=10

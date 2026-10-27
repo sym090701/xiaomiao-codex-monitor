@@ -10,6 +10,7 @@ import secrets
 import time
 
 from aiohttp import web
+from machw_archive import MacHardwareArchive
 
 
 def normalize(result, now=None):
@@ -104,6 +105,7 @@ class Collector:
         self.failed = False
         self.mac_metrics = None
         self.mac_seen = None
+        self.archive = MacHardwareArchive.from_env()
 
     def performance(self):
         if self.mac_seen is None or time.monotonic() - self.mac_seen > 45:
@@ -155,6 +157,7 @@ def create_app(collector, ingest_token=None):
         except (ValueError, TypeError):
             raise web.HTTPBadRequest(text="Invalid metrics")
         collector.mac_metrics, collector.mac_seen = metrics, time.monotonic()
+        collector.archive.record(metrics)
         return web.json_response({"ok": True})
     async def websocket(request):
         ws = web.WebSocketResponse(heartbeat=20)
@@ -174,10 +177,17 @@ def create_app(collector, ingest_token=None):
         return ws
     async def lifetime(_app):
         task = asyncio.create_task(collector.poll())
+        sync_task = (asyncio.create_task(collector.archive.sync_loop())
+                     if collector.archive.enabled else None)
         yield
         task.cancel()
+        if sync_task:
+            sync_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        if sync_task:
+            with contextlib.suppress(asyncio.CancelledError):
+                await sync_task
     app.cleanup_ctx.append(lifetime)
     app.router.add_get("/health", health)
     app.router.add_get("/usage", usage)
