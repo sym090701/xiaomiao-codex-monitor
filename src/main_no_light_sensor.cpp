@@ -137,6 +137,8 @@ float trendFreshnessSeconds = -1.0f;
 int32_t trendLatestResetSeconds = -1;
 String preheatMessage;
 uint32_t preheatMessageUntilMs = 0;
+volatile bool preheatInProgress = false;
+volatile int preheatHttpStatus = 0;
 uint32_t lastPreheatStatusFetchMs = 0;
 bool preheatStatusReady = false;
 bool preheatThreadPresent = false;
@@ -633,21 +635,37 @@ void applyUsagePayload(JsonVariantConst doc) {
 }
 
 #ifdef XIAOMIAO
+void preheatHttpTask(void *argument) {
+  String *url = static_cast<String *>(argument);
+  HTTPClient http;
+  http.begin(*url);
+  http.setTimeout(60000);
+  preheatHttpStatus = http.POST("{}");
+  http.end();
+  delete url;
+  preheatInProgress = false;
+  vTaskDelete(nullptr);
+}
+
 void requestPreheat() {
+  if (preheatInProgress) return;
   if (WiFi.status() != WL_CONNECTED) {
     preheatMessage = "PREHEAT WIFI";
     preheatMessageUntilMs = millis() + 3000;
     return;
   }
-  HTTPClient http;
-  String url = String("http://") + config.usageHost + ":" + String(config.usagePort) + "/api/preheat";
-  http.begin(url);
-  http.setTimeout(60000);
-  int status = http.POST("{}");
-  preheatMessage = status == HTTP_CODE_OK ? "PREHEAT OK" : "PREHEAT ERR";
-  preheatMessageUntilMs = millis() + 4000;
-  Serial.printf("[Preheat] HTTP %d\n", status);
-  http.end();
+  preheatMessage = "PREHEAT...";
+  preheatMessageUntilMs = 0;
+  preheatHttpStatus = 0;
+  preheatInProgress = true;
+  String *url = new String(String("http://") + config.usageHost + ":" +
+                           String(config.usagePort) + "/api/preheat");
+  if (xTaskCreatePinnedToCore(preheatHttpTask, "preheat", 8192, url, 1, nullptr, 1) != pdPASS) {
+    delete url;
+    preheatInProgress = false;
+    preheatMessage = "PREHEAT ERR";
+    preheatMessageUntilMs = millis() + 4000;
+  }
   usagePageDirty = true;
 }
 
@@ -1559,6 +1577,14 @@ void loop() {
 #ifdef XIAOMIAO
   fetchNasTrendIfNeeded();
   fetchPreheatStatusIfNeeded();
+  if (!preheatInProgress && preheatHttpStatus != 0) {
+    int status = preheatHttpStatus;
+    preheatHttpStatus = 0;
+    preheatMessage = status == HTTP_CODE_OK ? "PREHEAT OK" : "PREHEAT ERR";
+    preheatMessageUntilMs = millis() + 4000;
+    Serial.printf("[Preheat] HTTP %d\n", status);
+    usagePageDirty = true;
+  }
 #endif
   updateWsFailSafe();
   if (wsConnected &&
@@ -1603,6 +1629,10 @@ void loop() {
 #endif
   }
 #ifdef XIAOMIAO
+  if (preheatInProgress) {
+    uint16_t lamp = ((millis() / 250UL) & 1) ? rgb565(255, 150, 40) : rgb565(80, 45, 15);
+    frameB.fillRect(0, 0, SCREEN_W, 4, lamp);
+  }
 #ifdef XM_STANDALONE_OTA
   if (showOtaInfo) {
     frameB.fillScreen(ST77XX_BLACK);
