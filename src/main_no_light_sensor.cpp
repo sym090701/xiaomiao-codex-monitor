@@ -1405,7 +1405,9 @@ void loop() {
     comboSince = 0;
     if (millis() - lastButton > 200) {
       if (a && !previousA) {
+#ifdef XM_STANDALONE_OTA
         showOtaInfo = false;
+#endif
         config.displayMode = (config.displayMode + 1) % 3;
         lastTrendFetchMs = 0;
         footerUntilMs = millis() + 2500;
@@ -1445,7 +1447,9 @@ void loop() {
         lastButton = millis();
       }
       if (b && !previousB) {
+#ifdef XM_STANDALONE_OTA
         showOtaInfo = false;
+#endif
         config.displayMode = (config.displayMode + 2) % 3;
         lastTrendFetchMs = 0;
         footerUntilMs = millis() + 2500;
