@@ -129,7 +129,7 @@ uint8_t trendCount = 0;
 uint8_t trendHead = 0;
 uint32_t lastTrendFetchMs = 0;
 uint32_t trendLastSuccessMs = 0;
-uint8_t trendWindowHours = 12;
+uint8_t trendWindowHours = 24;
 uint8_t trendCursor = 0;
 float trendRatePerHour = 0.0f;
 float trendEtaHours = -1.0f;
@@ -137,6 +137,13 @@ float trendFreshnessSeconds = -1.0f;
 int32_t trendLatestResetSeconds = -1;
 String preheatMessage;
 uint32_t preheatMessageUntilMs = 0;
+uint32_t lastPreheatStatusFetchMs = 0;
+bool preheatStatusReady = false;
+bool preheatThreadPresent = false;
+bool preheatCooldownActive = false;
+int32_t preheatCooldownSeconds = -1;
+String preheatLastResult;
+String preheatLastError;
 #endif
 
 struct PerformanceState {
@@ -300,7 +307,7 @@ void loadConfig() {
   config.screenFlipped = prefs.getBool("flip", false);
   config.followHostScreen = prefs.getBool("follow", true);
   config.backlightPercent = constrain(prefs.getUChar("brightness", 100), 1, 100);
-  config.displayMode = constrain(prefs.getUChar("mode", 0), 0, 2);
+  config.displayMode = constrain(prefs.getUChar("mode", 0), 0, 3);
   config.memoryMetric = constrain(prefs.getUChar("memmetric", 0), 0, 1);
   config.performanceBackground = normalizedColor(
       prefs.getString("perf_bg", config.performanceBackground), config.performanceBackground);
@@ -447,7 +454,7 @@ void handleSave() {
     config.backlightPercent =
         constrain(webServer.arg("backlight_brightness").toInt(), 1, 100);
   }
-  config.displayMode = constrain(webServer.arg("display_mode").toInt(), 0, 2);
+  config.displayMode = constrain(webServer.arg("display_mode").toInt(), 0, 3);
   config.memoryMetric = constrain(webServer.arg("memory_metric").toInt(), 0, 1);
   config.performanceBackground = normalizedColor(
       webServer.arg("performance_background"), config.performanceBackground);
@@ -642,6 +649,32 @@ void requestPreheat() {
   http.end();
   usagePageDirty = true;
 }
+
+void fetchPreheatStatusIfNeeded() {
+  if (config.displayMode != 3 || WiFi.status() != WL_CONNECTED ||
+      (lastPreheatStatusFetchMs && millis() - lastPreheatStatusFetchMs < 30000UL)) {
+    return;
+  }
+  lastPreheatStatusFetchMs = millis();
+  HTTPClient http;
+  String url = String("http://") + config.usageHost + ":" + String(config.usagePort) + "/api/preheat/status";
+  http.begin(url);
+  http.setTimeout(3500);
+  int status = http.GET();
+  if (status == HTTP_CODE_OK) {
+    DynamicJsonDocument doc(2048);
+    if (deserializeJson(doc, http.getString()) == DeserializationError::Ok) {
+      preheatStatusReady = true;
+      preheatThreadPresent = doc["thread_id_present"] | false;
+      preheatCooldownActive = doc["cooldown_active"] | false;
+      preheatCooldownSeconds = doc["cooldown_remaining_seconds"] | -1;
+      preheatLastResult = doc["last_result"] | "never";
+      preheatLastError = doc["last_error"] | "";
+      usagePageDirty = true;
+    }
+  }
+  http.end();
+}
 #endif
 
 void applyPerformancePayload(JsonVariantConst doc) {
@@ -710,7 +743,7 @@ void sendDeviceStatus(const char *type) {
 
 void applyRemoteConfig(JsonVariantConst remote) {
   if (remote["display_mode"].is<int>()) {
-    config.displayMode = constrain(remote["display_mode"].as<int>(), 0, 2);
+    config.displayMode = constrain(remote["display_mode"].as<int>(), 0, 3);
   }
   if (remote["memory_metric"].is<int>()) {
     config.memoryMetric = constrain(remote["memory_metric"].as<int>(), 0, 1);
@@ -1230,6 +1263,31 @@ void drawTrendPage(GFXcanvas16 &spr) {
     drawRightText(spr, 158, 116, "R" + shortDuration(trendLatestResetSeconds), muted);
   }
 }
+
+void drawPreheatPage(GFXcanvas16 &spr) {
+  spr.fillScreen(rgb565(8, 10, 16));
+  uint16_t cyan = rgb565(55, 209, 176);
+  uint16_t green = rgb565(104, 220, 90);
+  uint16_t amber = rgb565(255, 196, 64);
+  uint16_t muted = rgb565(128, 141, 166);
+  uint16_t text = rgb565(220, 225, 235);
+  spr.fillRect(0, 0, SCREEN_W, 12, rgb565(18, 23, 34));
+  drawText(spr, 4, 2, "PREHEAT", cyan);
+  drawRightText(spr, 158, 2, preheatStatusReady ? "LIVE" : "WAIT", muted);
+  drawText(spr, 6, 22, "THREAD", muted);
+  drawText(spr, 84, 22, preheatThreadPresent ? "READY" : "NONE",
+           preheatThreadPresent ? green : amber);
+  drawText(spr, 6, 42, "LAST", muted);
+  drawText(spr, 84, 42, preheatLastResult.length() ? preheatLastResult : "never", text);
+  drawText(spr, 6, 62, "COOLDOWN", muted);
+  drawText(spr, 84, 62, preheatCooldownActive ? shortDuration(preheatCooldownSeconds) : "READY",
+           preheatCooldownActive ? amber : green);
+  if (preheatLastError.length()) {
+    drawText(spr, 6, 82, "ERROR", muted);
+    drawText(spr, 48, 82, preheatLastError.substring(0, 18), amber);
+  }
+  drawText(spr, 6, 106, "Hold B 1.2s to preheat", muted);
+}
 #endif
 
 String compactRate(float mbps) {
@@ -1443,7 +1501,7 @@ void loop() {
 #ifdef XM_STANDALONE_OTA
         showOtaInfo = false;
 #endif
-        config.displayMode = (config.displayMode + 1) % 3;
+        config.displayMode = (config.displayMode + 1) % 4;
         lastTrendFetchMs = 0;
         footerUntilMs = millis() + 2500;
         usagePageDirty = true;
@@ -1453,10 +1511,10 @@ void loop() {
                  (up && !previousUp || down && !previousDown ||
                   left && !previousLeft || right && !previousRight)) {
         if (up && !previousUp) {
-          trendWindowHours = trendWindowHours == 6 ? 24 : trendWindowHours == 12 ? 6 : 12;
+          trendWindowHours = trendWindowHours == 3 ? 24 : 3;
           lastTrendFetchMs = 0;
         } else if (down && !previousDown) {
-          trendWindowHours = trendWindowHours == 6 ? 12 : trendWindowHours == 12 ? 24 : 6;
+          trendWindowHours = trendWindowHours == 3 ? 24 : 3;
           lastTrendFetchMs = 0;
         } else if (left && !previousLeft) {
           if (trendCount > 0 && trendCursor > 0) trendCursor--;
@@ -1467,14 +1525,14 @@ void loop() {
         usagePageDirty = true;
         lastButton = millis();
       } else if ((down && !previousDown) || (right && !previousRight)) {
-        config.displayMode = (config.displayMode + 1) % 3;
+        config.displayMode = (config.displayMode + 1) % 4;
         lastTrendFetchMs = 0;
         footerUntilMs = millis() + 2500;
         usagePageDirty = true;
         sendDeviceStatus("status");
         lastButton = millis();
       } else if ((up && !previousUp) || (left && !previousLeft)) {
-        config.displayMode = (config.displayMode + 2) % 3;
+        config.displayMode = (config.displayMode + 3) % 4;
         lastTrendFetchMs = 0;
         footerUntilMs = millis() + 2500;
         usagePageDirty = true;
@@ -1485,7 +1543,7 @@ void loop() {
 #ifdef XM_STANDALONE_OTA
         showOtaInfo = false;
 #endif
-        config.displayMode = (config.displayMode + 2) % 3;
+        config.displayMode = (config.displayMode + 3) % 4;
         lastTrendFetchMs = 0;
         footerUntilMs = millis() + 2500;
         usagePageDirty = true;
@@ -1513,6 +1571,7 @@ void loop() {
   }
 #ifdef XIAOMIAO
   fetchNasTrendIfNeeded();
+  fetchPreheatStatusIfNeeded();
 #endif
   updateWsFailSafe();
   if (wsConnected &&
@@ -1543,9 +1602,15 @@ void loop() {
     drawCodexStatusBar(frameB);
   } else if (config.displayMode == 1) {
     drawPerformancePage(frameB);
-  } else {
+  } else if (config.displayMode == 2) {
 #ifdef XIAOMIAO
     drawTrendPage(frameB);
+#else
+    drawPerformancePage(frameB);
+#endif
+  } else {
+#ifdef XIAOMIAO
+    drawPreheatPage(frameB);
 #else
     drawPerformancePage(frameB);
 #endif
@@ -1562,14 +1627,6 @@ void loop() {
     drawText(frameB, 4, 103, "A: Back", ST77XX_WHITE);
   }
 #endif
-  if (config.displayMode != 2 && millis() < footerUntilMs) {
-    frameB.fillRect(0, 116, SCREEN_W, 12, rgb565(18, 23, 34));
-#ifdef XM_STANDALONE_OTA
-    drawText(frameB, 3, 119, "A:Page B:Link AB:OTA", ST77XX_WHITE);
-#else
-    drawText(frameB, 3, 119, "A:Next B:Back Bhold:Heat", ST77XX_WHITE);
-#endif
-  }
   if (preheatMessageUntilMs && millis() < preheatMessageUntilMs) {
     frameB.fillRect(0, 0, SCREEN_W, 12, rgb565(18, 23, 34));
     drawText(frameB, 4, 2, preheatMessage, preheatMessage == "PREHEAT OK"

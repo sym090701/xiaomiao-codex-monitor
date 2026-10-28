@@ -102,6 +102,15 @@ class Preheater:
         os.chmod(tmp, 0o600)
         os.replace(tmp, self.state_file)
 
+    def status(self):
+        cooldown_until = float(self.state.get("cooldown_until", 0) or 0)
+        return {"thread_id_present": bool(self.state.get("thread_id")),
+                "last_result": self.state.get("last_result"),
+                "last_error": self.state.get("last_error"),
+                "last_turn_at": self.state.get("last_turn_at"),
+                "cooldown_active": cooldown_until > time.time(),
+                "cooldown_remaining_seconds": max(0, int(cooldown_until - time.time()))}
+
     async def _rpc(self, proc, request_id, method, params):
         proc.stdin.write((json.dumps({"id": request_id, "method": method,
                                       "params": params}) + "\n").encode())
@@ -278,6 +287,15 @@ def create_app(collector, ingest_token=None):
                 (not token and request.remote != allowed_ip):
             raise web.HTTPUnauthorized(text="Unauthorized")
         return web.json_response(await collector.preheater.run(collector))
+    async def preheat_status(request):
+        allowed_ip = os.environ.get("PREHEAT_ALLOWED_IP", "192.168.1.159")
+        token_file = os.environ.get("PREHEAT_TOKEN_FILE")
+        token = Path(token_file).read_text().strip() if token_file else ""
+        supplied = request.headers.get("Authorization", "")
+        if (token and not secrets.compare_digest(supplied, "Bearer " + token)) or \
+                (not token and request.remote != allowed_ip):
+            raise web.HTTPUnauthorized(text="Unauthorized")
+        return web.json_response(collector.preheater.status())
     async def ingest(request):
         if not ingest_token:
             raise web.HTTPServiceUnavailable(text="Mac ingest not configured")
@@ -327,6 +345,7 @@ def create_app(collector, ingest_token=None):
     app.router.add_get("/health", health)
     app.router.add_get("/usage", usage)
     app.router.add_post("/api/preheat", preheat)
+    app.router.add_get("/api/preheat/status", preheat_status)
     app.router.add_get("/ws", websocket)
     app.router.add_post("/api/mac/metrics", ingest)
     return app
