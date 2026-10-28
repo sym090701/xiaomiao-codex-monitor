@@ -5,8 +5,9 @@ import json
 
 def build_header(config):
     required = {"wifi_networks", "server_host", "server_port"}
-    if set(config) != required:
-        raise ValueError("device config requires exactly wifi_networks, server_host, server_port")
+    optional = {"preheat_token"}
+    if not required.issubset(config) or set(config) - required - optional:
+        raise ValueError("device config requires wifi_networks, server_host, server_port; optional preheat_token")
     for key in ("server_host",):
         if not isinstance(config[key], str) or "\0" in config[key]:
             raise ValueError("device configuration strings must not contain NUL")
@@ -27,6 +28,9 @@ def build_header(config):
     port = config["server_port"]
     if type(port) is not int or not 1 <= port <= 65535:
         raise ValueError("server_port must be an integer from 1 to 65535")
+    preheat_token = config.get("preheat_token", "")
+    if not isinstance(preheat_token, str) or "\0" in preheat_token or len(preheat_token) > 128:
+        raise ValueError("preheat_token must be an optional string up to 128 characters")
     canonical = json.dumps(config, sort_keys=True, ensure_ascii=True).encode()
     def literal(value):
         return '"' + ''.join('\\%03o' % b for b in value.encode()) + '"'
@@ -39,6 +43,7 @@ def build_header(config):
         'static const unsigned XM_NETWORK_COUNT = sizeof(XM_NETWORKS) / sizeof(XM_NETWORKS[0]);',
         'static const char XM_BOOT_HOST[] = ' + literal(host) + ';',
         'static const unsigned short XM_BOOT_PORT = %d;' % port,
+        'static const char XM_PREHEAT_TOKEN[] = ' + literal(preheat_token) + ';',
         'static const char XM_BOOT_REV[] = "%s";' % hashlib.sha256(canonical).hexdigest(),
         '',
     ])

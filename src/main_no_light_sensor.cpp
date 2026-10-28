@@ -135,6 +135,8 @@ float trendRatePerHour = 0.0f;
 float trendEtaHours = -1.0f;
 float trendFreshnessSeconds = -1.0f;
 int32_t trendLatestResetSeconds = -1;
+String preheatMessage;
+uint32_t preheatMessageUntilMs = 0;
 #endif
 
 struct PerformanceState {
@@ -621,6 +623,26 @@ void applyUsagePayload(JsonVariantConst doc) {
   usage.weekly = parseUsageWindow(doc["weekly"]);
   usagePageDirty = true;
 }
+
+#ifdef XIAOMIAO
+void requestPreheat() {
+  if (WiFi.status() != WL_CONNECTED) {
+    preheatMessage = "PREHEAT WIFI";
+    preheatMessageUntilMs = millis() + 3000;
+    return;
+  }
+  HTTPClient http;
+  String url = String("http://") + config.usageHost + ":" + String(config.usagePort) + "/api/preheat";
+  http.begin(url);
+  http.setTimeout(60000);
+  int status = http.POST("{}");
+  preheatMessage = status == HTTP_CODE_OK ? "PREHEAT OK" : "PREHEAT ERR";
+  preheatMessageUntilMs = millis() + 4000;
+  Serial.printf("[Preheat] HTTP %d\n", status);
+  http.end();
+  usagePageDirty = true;
+}
+#endif
 
 void applyPerformancePayload(JsonVariantConst doc) {
   bool firstSample = !performance.ok;
@@ -1387,9 +1409,22 @@ void loop() {
   static bool previousUp = false, previousDown = false;
   static bool previousLeft = false, previousRight = false;
   static uint32_t lastButton = 0, comboSince = 0;
+  static uint32_t bSince = 0;
+  static bool preheatTriggered = false;
   bool a = digitalRead(34) == LOW, b = digitalRead(12) == LOW;
   bool up = digitalRead(2) == LOW, down = digitalRead(13) == LOW;
   bool left = digitalRead(27) == LOW, right = digitalRead(35) == LOW;
+  if (b && !previousB) {
+    bSince = millis();
+    preheatTriggered = false;
+  }
+  if (!b) {
+    bSince = 0;
+    preheatTriggered = false;
+  } else if (!a && bSince && !preheatTriggered && millis() - bSince >= 1200) {
+    requestPreheat();
+    preheatTriggered = true;
+  }
   if (a && b) {
     if (!comboSince) comboSince = millis();
     if (millis() - comboSince > 1500) {
@@ -1532,8 +1567,13 @@ void loop() {
 #ifdef XM_STANDALONE_OTA
     drawText(frameB, 3, 119, "A:Page B:Link AB:OTA", ST77XX_WHITE);
 #else
-    drawText(frameB, 3, 119, "A:Page  B:Link  AB:Exit", ST77XX_WHITE);
+    drawText(frameB, 3, 119, "A:Next B:Back Bhold:Heat", ST77XX_WHITE);
 #endif
+  }
+  if (preheatMessageUntilMs && millis() < preheatMessageUntilMs) {
+    frameB.fillRect(0, 0, SCREEN_W, 12, rgb565(18, 23, 34));
+    drawText(frameB, 4, 2, preheatMessage, preheatMessage == "PREHEAT OK"
+             ? rgb565(104, 220, 90) : rgb565(255, 120, 80));
   }
   tft.drawRGBBitmap(0, 0, frameB.getBuffer(), SCREEN_W, SCREEN_H);
 #else
