@@ -165,6 +165,8 @@ class Preheater:
                     thread_id = result.get("thread", {}).get("id")
                     if not thread_id:
                         raise RuntimeError("Codex preheat thread was not created")
+                else:
+                    await self._rpc(proc, 2, "thread/resume", {"threadId": thread_id})
                 turn_id = str(uuid.uuid4())
                 proc.stdin.write((json.dumps({"id": 3, "method": "turn/start",
                     "params": {"threadId": thread_id, "input": [{
