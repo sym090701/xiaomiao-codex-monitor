@@ -14,6 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description="Build XiaoMiao firmware")
     parser.add_argument("--configured", action="store_true", help="Embed device.local.json (private BIN)")
     parser.add_argument("--configure", action="store_true", help="Create private config interactively, then build")
+    parser.add_argument("--standalone", action="store_true", help="Build standalone dual-slot OTA firmware")
     args = parser.parse_args()
     configured = args.configured or args.configure
     if args.configure:
@@ -35,7 +36,7 @@ def main():
         path.touch(mode=0o600, exist_ok=True)
         path.chmod(0o600)
         path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-    environment = "xiaomiao_preconfigured" if configured else "xiaomiao"
+    environment = ("xiaomiao_standalone_preconfigured" if configured else "xiaomiao_standalone") if args.standalone else ("xiaomiao_preconfigured" if configured else "xiaomiao")
     if configured and not (ROOT / "device.local.json").exists():
         raise SystemExit("Run with --configure or fill device.local.json first")
     executable = shutil.which("pio") or shutil.which("platformio")
@@ -45,16 +46,19 @@ def main():
     if not executable:
         raise SystemExit("Install PlatformIO first: python3 -m pip install platformio")
     subprocess.run([executable, "run", "-e", environment], cwd=ROOT, check=True)
-    output = ROOT / ("dist-private" if configured else "dist")
+    private = configured or args.standalone
+    output = ROOT / ("dist-private" if private else "dist")
     output.mkdir(exist_ok=True)
     name = "XiaoMiao-Preconfigured-PRIVATE.bin" if configured else "XiaoMiao-Portal-Launcher.bin"
+    if args.standalone:
+        name = "XiaoMiao-Standalone-OTA-PRIVATE.bin"
     target = output / name
     shutil.copyfile(ROOT / ".pio/build" / environment / "firmware.bin", target)
-    if configured:
+    if private:
         target.chmod(0o600)
     print("Firmware: " + str(target))
-    if configured:
-        print("PRIVATE: contains Wi-Fi credentials. Do not upload or share this BIN.")
+    if private:
+        print("PRIVATE: contains Wi-Fi and/or OTA credentials. Do not upload or share this BIN.")
 
 
 if __name__ == "__main__":

@@ -33,6 +33,7 @@ io.github.xiaomiao.codex-monitor.plist
 .env
 .env.*
 device.local.json
+ota.local.json
 mac-agent.local.json
 *.token
 dist-private/

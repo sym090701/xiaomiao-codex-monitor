@@ -8,6 +8,7 @@
 #include <SPI.h>
 #include <WebServer.h>
 #include <WebSocketsClient.h>
+#include <HTTPClient.h>
 #include <WiFi.h>
 #ifdef XM_PRECONFIGURED
 #include "xiaomiao_boot_config.h"
@@ -18,7 +19,11 @@
 #endif
 
 constexpr int SCREEN_W = 160;
+#ifdef XIAOMIAO
+constexpr int SCREEN_H = 128;
+#else
 constexpr int SCREEN_H = 80;
+#endif
 #ifdef XIAOMIAO
 constexpr int PIN_BLK = -1;
 constexpr int PIN_CS = 5;
@@ -49,6 +54,11 @@ constexpr uint16_t DEFAULT_USAGE_PORT = 8080;
 constexpr uint16_t DEFAULT_REFRESH_SECONDS = 30;
 constexpr uint32_t FIVE_HOUR_WINDOW_SECONDS = 5UL * 60UL * 60UL;
 constexpr uint32_t WEEK_WINDOW_SECONDS = 7UL * 24UL * 60UL * 60UL;
+#ifdef XIAOMIAO
+constexpr char TREND_HOST[] = "192.168.1.158";
+constexpr uint16_t TREND_PORT = 8788;
+constexpr uint32_t TREND_FETCH_MS = 60000UL;
+#endif
 
 class CalibratedST7735 : public Adafruit_ST7735 {
 public:
@@ -109,6 +119,24 @@ struct UsageState {
   uint32_t lastFetchMs = 0;
 };
 
+#ifdef XIAOMIAO
+constexpr uint8_t TREND_POINTS = 48;          // 4 hours at 5-minute samples.
+float trendFiveHour[TREND_POINTS] = {};
+uint32_t trendEpochs[TREND_POINTS] = {};
+uint32_t trendResetEpochs[TREND_POINTS] = {};
+char trendTimes[TREND_POINTS][6] = {};
+uint8_t trendCount = 0;
+uint8_t trendHead = 0;
+uint32_t lastTrendFetchMs = 0;
+uint32_t trendLastSuccessMs = 0;
+uint8_t trendWindowHours = 12;
+uint8_t trendCursor = 0;
+float trendRatePerHour = 0.0f;
+float trendEtaHours = -1.0f;
+float trendFreshnessSeconds = -1.0f;
+int32_t trendLatestResetSeconds = -1;
+#endif
+
 struct PerformanceState {
   bool ok = false;
   String error;
@@ -148,6 +176,13 @@ bool mdnsStarted = false;
 bool wsStarted = false;
 volatile bool hostScreenOn = true;
 bool wsConnected = false;
+#ifdef XM_STANDALONE_OTA
+#include "xiaomiao_ota.h"
+bool showOtaInfo = false;
+#endif
+#ifdef XIAOMIAO
+uint32_t footerUntilMs = 0;
+#endif
 float backlightDuty = BACKLIGHT_MAX_DUTY;
 bool backlightPwmReady = false;
 
@@ -175,7 +210,11 @@ void updateBacklight() {
 }
 
 void applyScreenDirection() {
+#ifdef XIAOMIAO
+  tft.setRotation(config.screenFlipped ? 1 : 3);
+#else
   tft.setRotation(config.screenFlipped ? 3 : 1);
+#endif
 }
 
 uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
@@ -259,7 +298,7 @@ void loadConfig() {
   config.screenFlipped = prefs.getBool("flip", false);
   config.followHostScreen = prefs.getBool("follow", true);
   config.backlightPercent = constrain(prefs.getUChar("brightness", 100), 1, 100);
-  config.displayMode = constrain(prefs.getUChar("mode", 0), 0, 1);
+  config.displayMode = constrain(prefs.getUChar("mode", 0), 0, 2);
   config.memoryMetric = constrain(prefs.getUChar("memmetric", 0), 0, 1);
   config.performanceBackground = normalizedColor(
       prefs.getString("perf_bg", config.performanceBackground), config.performanceBackground);
@@ -406,7 +445,7 @@ void handleSave() {
     config.backlightPercent =
         constrain(webServer.arg("backlight_brightness").toInt(), 1, 100);
   }
-  config.displayMode = constrain(webServer.arg("display_mode").toInt(), 0, 1);
+  config.displayMode = constrain(webServer.arg("display_mode").toInt(), 0, 2);
   config.memoryMetric = constrain(webServer.arg("memory_metric").toInt(), 0, 1);
   config.performanceBackground = normalizedColor(
       webServer.arg("performance_background"), config.performanceBackground);
@@ -448,6 +487,9 @@ void handleSave() {
 }
 
 void setupWebServer() {
+#ifdef XM_STANDALONE_OTA
+  xmSetupOta();
+#endif
   webServer.on("/", HTTP_GET, handleRoot);
   webServer.on("/api/config", HTTP_GET, handleConfigApi);
   webServer.on("/save", HTTP_POST, handleSave);
@@ -515,6 +557,15 @@ void setupMdnsIfNeeded() {
   }
   if (MDNS.begin(DEVICE_HOSTNAME)) {
     MDNS.addService("http", "tcp", 80);
+#ifdef XM_STANDALONE_OTA
+    MDNS.setInstanceName("XiaoMiao Codex OTA");
+    MDNS.addService("xiaomiao-ota", "tcp", 80);
+    MDNS.addServiceTxt("xiaomiao-ota", "tcp", "target", "xiaomiao-esp32");
+    MDNS.addServiceTxt("xiaomiao-ota", "tcp", "path", "/ota");
+    MDNS.addServiceTxt("xiaomiao-ota", "tcp", "auth", "http-digest");
+    MDNS.addServiceTxt("xiaomiao-ota", "tcp", "protocol", "1");
+    Serial.println("[mDNS] codexusage.local / _xiaomiao-ota._tcp");
+#endif
     mdnsStarted = true;
   }
 }
@@ -556,7 +607,13 @@ UsageWindow parseUsageWindow(JsonVariantConst window) {
 }
 
 void applyUsagePayload(JsonVariantConst doc) {
+#ifdef XIAOMIAO
+  bool wasOk = usage.ok;
+#endif
   usage.ok = doc["ok"].as<bool>();
+#ifdef XIAOMIAO
+  if (usage.ok != wasOk) Serial.printf("[Codex] quota %s\n", usage.ok ? "ready" : "unavailable");
+#endif
   usage.error = doc["error"] | "";
   usage.planType = doc["plan_type"] | "";
   usage.limitReached = doc["limit_reached"].as<bool>();
@@ -631,7 +688,7 @@ void sendDeviceStatus(const char *type) {
 
 void applyRemoteConfig(JsonVariantConst remote) {
   if (remote["display_mode"].is<int>()) {
-    config.displayMode = constrain(remote["display_mode"].as<int>(), 0, 1);
+    config.displayMode = constrain(remote["display_mode"].as<int>(), 0, 2);
   }
   if (remote["memory_metric"].is<int>()) {
     config.memoryMetric = constrain(remote["memory_metric"].as<int>(), 0, 1);
@@ -715,6 +772,9 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   switch (type) {
     case WStype_CONNECTED:
       wsConnected = true;
+#ifdef XIAOMIAO
+      Serial.printf("[Codex] WebSocket connected, IP=%s\n", WiFi.localIP().toString().c_str());
+#endif
       lastWsMessageMs = millis();
       sendDeviceStatus("hello");
       break;
@@ -747,6 +807,12 @@ void drawText(GFXcanvas16 &spr, int16_t x, int16_t y, const String &text, uint16
   spr.setCursor(x, y);
   spr.print(text);
   spr.setTextSize(1);
+}
+
+void drawRightText(GFXcanvas16 &spr, int16_t right, int16_t y, const String &text,
+                   uint16_t color, uint8_t size = 1) {
+  int16_t width = int16_t(text.length()) * 6 * size;
+  drawText(spr, right - width, y, text, color, size);
 }
 
 uint16_t blendColor565(uint16_t background, uint16_t foreground, uint8_t coverage) {
@@ -905,7 +971,13 @@ void drawCodexStatusIndicator(GFXcanvas16 &spr, int16_t x, int16_t y,
 }
 
 void drawCodexStatusBar(GFXcanvas16 &spr) {
+#ifdef XIAOMIAO
+  // Match the performance page: an idle Codex must not leave three bright
+  // green columns at the panel edge. Active/permission feedback remains.
+  drawCodexStatusIndicator(spr, SCREEN_W - 4, 0, SCREEN_H, true, true);
+#else
   drawCodexStatusIndicator(spr, SCREEN_W - 4, 0, SCREEN_H, true, false);
+#endif
 }
 
 void drawStatusPage(GFXcanvas16 &spr, const String &title, const String &line1,
@@ -948,7 +1020,8 @@ void drawUsagePage(GFXcanvas16 &spr) {
   spr.fillRect(0, 0, SCREEN_W, 11, panel);
   drawText(spr, 4, 2, "CODEX", cyan);
   drawText(spr, 50, 2, usage.planType.length() ? usage.planType : "USAGE", muted);
-  drawText(spr, 132, 2, WiFi.RSSI() > -67 ? "WiFi" : "wifi", WiFi.RSSI() > -67 ? green : amber);
+  drawRightText(spr, SCREEN_W - 2, 2, WiFi.RSSI() > -67 ? "WiFi" : "wifi",
+                WiFi.RSSI() > -67 ? green : amber);
 
   float fiveLeft = usage.fiveHour.valid ? usage.fiveHour.remainingPercent : 0.0f;
   float weekLeft = usage.weekly.valid ? usage.weekly.remainingPercent : 0.0f;
@@ -956,6 +1029,18 @@ void drawUsagePage(GFXcanvas16 &spr) {
   uint16_t weekColor = weekLeft > 35.0f ? green : (weekLeft > 15.0f ? amber : red);
   uint16_t outerTrack = rgb565(30, 36, 49);
   uint16_t innerTrack = rgb565(40, 48, 64);
+
+#ifdef XIAOMIAO
+  drawText(spr, 5, 19, "5 HOUR LEFT", muted);
+  drawText(spr, 108, 17, usage.fiveHour.valid ? percentText(fiveLeft) : "--", fiveColor, 2);
+  drawProgressBar(spr, 5, 37, 150, 10, fiveLeft / 100.0f, fiveColor);
+  drawText(spr, 5, 51, "Reset " + shortDuration(usage.fiveHour.resetAfterSeconds), text);
+  drawText(spr, 5, 69, "WEEK LEFT", muted);
+  drawText(spr, 108, 67, usage.weekly.valid ? percentText(weekLeft) : "--", weekColor, 2);
+  drawProgressBar(spr, 5, 87, 150, 10, weekLeft / 100.0f, weekColor);
+  drawText(spr, 5, 101, "Reset " + shortDuration(usage.weekly.resetAfterSeconds), text);
+  return;
+#endif
 
   constexpr int16_t ringX = 38;
   constexpr int16_t ringY = 44;
@@ -982,6 +1067,149 @@ void drawUsagePage(GFXcanvas16 &spr) {
                   resetProgress(usage.weekly, WEEK_WINDOW_SECONDS), weekColor);
 }
 
+#ifdef XIAOMIAO
+void fetchNasTrendIfNeeded() {
+  if (config.displayMode != 2 || WiFi.status() != WL_CONNECTED ||
+      (lastTrendFetchMs && millis() - lastTrendFetchMs < TREND_FETCH_MS)) {
+    return;
+  }
+  lastTrendFetchMs = millis();
+  HTTPClient http;
+  String url = String("http://") + TREND_HOST + ":" + String(TREND_PORT) +
+               "/api/codex-trend?hours=" + String(trendWindowHours) + "&points=48";
+  http.begin(url);
+  http.setTimeout(3500);
+  int status = http.GET();
+  if (status == HTTP_CODE_OK) {
+    DynamicJsonDocument doc(12288);
+    if (deserializeJson(doc, http.getString()) == DeserializationError::Ok) {
+      JsonArray points = doc["points"].as<JsonArray>();
+      uint8_t count = min(uint8_t(points.size()), TREND_POINTS);
+      trendRatePerHour = doc["rate_percent_per_hour"] | 0.0f;
+      trendEtaHours = doc["eta_hours"] | -1.0f;
+      trendLatestResetSeconds = doc["latest_reset_after_seconds"] | -1;
+      if (count > 0) {
+        trendCount = count;
+        trendHead = count % TREND_POINTS;
+        uint8_t i = 0;
+        for (JsonObject point : points) {
+          if (i >= count) break;
+          trendFiveHour[i] = clampPercent(point["five_hour_remaining"] | 0.0f);
+          trendEpochs[i] = point["observed_at_epoch"] | 0UL;
+          trendResetEpochs[i] = point["five_hour_reset_at_epoch"] | 0UL;
+          String observedAt = point["observed_at_local"] | "";
+          if (observedAt.length() >= 16) {
+            observedAt.substring(11, 16).toCharArray(trendTimes[i], sizeof(trendTimes[i]));
+          } else {
+            trendTimes[i][0] = '\0';
+          }
+          i++;
+        }
+        trendCursor = count - 1;
+        trendLastSuccessMs = millis();
+      }
+    }
+  }
+  http.end();
+}
+
+void drawTrendGraph(GFXcanvas16 &spr, int16_t x, int16_t y, int16_t w, int16_t h,
+                    const String &label, const float *values, uint16_t color) {
+  uint16_t panel = rgb565(18, 23, 34);
+  uint16_t grid = rgb565(43, 50, 68);
+  uint16_t muted = rgb565(128, 141, 166);
+  spr.fillRect(x, y, w, h, panel);
+  spr.drawRect(x, y, w, h, grid);
+  spr.drawFastHLine(x + 22, y + h / 2, w - 23, grid);
+  drawText(spr, x + 4, y + 3, label, rgb565(160, 172, 195));
+  drawText(spr, x + 2, y + 16, "100", muted);
+  drawText(spr, x + 2, y + 44, "50", muted);
+  drawText(spr, x + 2, y + 70, "0", muted);
+  if (trendCount < 2) {
+    drawText(spr, x + w - 42, y + 3, "WAIT", muted);
+    return;
+  }
+  uint8_t oldest = trendCount < TREND_POINTS ? 0 : trendHead;
+  int16_t graphX = x + 22;
+  int16_t graphY = y + 16;
+  int16_t graphW = w - 26;
+  int16_t graphH = h - 36;
+  constexpr uint8_t axisTicks = 4;
+  for (uint8_t tick = 0; tick < axisTicks; tick++) {
+    uint8_t sample = uint8_t((uint32_t(tick) * (trendCount - 1)) / (axisTicks - 1));
+    int16_t tickX = graphX + int32_t(sample) * graphW / (trendCount - 1);
+    spr.drawFastVLine(tickX, graphY, graphH, grid);
+    uint8_t index = (oldest + sample) % TREND_POINTS;
+    if (trendTimes[index][0]) {
+      int16_t labelX = tickX - 15;
+      if (labelX < x + 1) labelX = x + 1;
+      if (labelX > x + w - 31) labelX = x + w - 31;
+      drawText(spr, labelX, y + h - 13, trendTimes[index], muted);
+    }
+  }
+  for (uint8_t i = 1; i < trendCount; i++) {
+    uint8_t prev = (oldest + i - 1) % TREND_POINTS;
+    uint8_t current = (oldest + i) % TREND_POINTS;
+    int16_t x1 = graphX + int32_t(i - 1) * graphW / (trendCount - 1);
+    int16_t x2 = graphX + int32_t(i) * graphW / (trendCount - 1);
+    int16_t y1 = graphY + graphH - 1 - int16_t(constrain(values[prev], 0.0f, 100.0f) * (graphH - 1) / 100.0f);
+    int16_t y2 = graphY + graphH - 1 - int16_t(constrain(values[current], 0.0f, 100.0f) * (graphH - 1) / 100.0f);
+    spr.drawLine(x1, y1, x2, y2, color);
+  }
+  uint32_t firstEpoch = trendEpochs[oldest];
+  uint32_t lastEpoch = trendEpochs[(oldest + trendCount - 1) % TREND_POINTS];
+  if (lastEpoch > firstEpoch) {
+    for (uint8_t i = 0; i < trendCount; i++) {
+      uint8_t index = (oldest + i) % TREND_POINTS;
+      uint32_t resetEpoch = trendResetEpochs[index];
+      if (resetEpoch >= firstEpoch && resetEpoch <= lastEpoch) {
+        int16_t resetX = graphX + int32_t(resetEpoch - firstEpoch) * graphW /
+                         int32_t(lastEpoch - firstEpoch);
+        spr.drawFastVLine(resetX, graphY, graphH, rgb565(255, 120, 80));
+        drawText(spr, min<int16_t>(x + w - 10, resetX + 2), graphY, "R", rgb565(255, 120, 80));
+        break;
+      }
+    }
+  }
+  uint8_t cursor = min(trendCursor, uint8_t(trendCount - 1));
+  int16_t cursorX = graphX + int32_t(cursor) * graphW / (trendCount - 1);
+  spr.drawFastVLine(cursorX, graphY, graphH, rgb565(255, 196, 64));
+  uint8_t cursorIndex = (oldest + cursor) % TREND_POINTS;
+  drawText(spr, x + w - 34, y + 3, percentText(values[cursorIndex]), rgb565(255, 196, 64));
+}
+
+String trendRateText() {
+  if (trendCount < 2 || trendRatePerHour <= 0.05f) return "0%/h";
+  return String(trendRatePerHour, 1) + "%/h";
+}
+
+String trendEtaText() {
+  if (trendCount < 2 || trendEtaHours < 0.0f) return "ETA --";
+  float hours = trendEtaHours;
+  if (hours >= 24.0f) return "ETA " + String(hours / 24.0f, 1) + "d";
+  return "ETA " + String(hours, 1) + "h";
+}
+
+void drawTrendPage(GFXcanvas16 &spr) {
+  spr.fillScreen(rgb565(8, 10, 16));
+  uint16_t cyan = rgb565(55, 209, 176);
+  uint16_t green = rgb565(104, 220, 90);
+  uint16_t muted = rgb565(128, 141, 166);
+  uint16_t panel = rgb565(18, 23, 34);
+  spr.fillRect(0, 0, SCREEN_W, 11, panel);
+  drawText(spr, 4, 2, String("5H ") + String(trendWindowHours) + "H", cyan);
+  bool fresh = trendLastSuccessMs && millis() - trendLastSuccessMs < 150000UL;
+  drawRightText(spr, SCREEN_W - 2, 2, fresh ? "LIVE" : "OLD",
+                fresh ? green : rgb565(255, 196, 64));
+  drawTrendGraph(spr, 4, 16, 152, 96, "5H", trendFiveHour, cyan);
+  drawText(spr, 7, 116, trendRateText(), muted);
+  drawText(spr, 62, 116, trendEtaText(), muted);
+  if (trendLatestResetSeconds >= 0) {
+    drawRightText(spr, 158, 116, "R" + shortDuration(trendLatestResetSeconds), muted);
+  }
+}
+#endif
+
 String compactRate(float mbps) {
   if (mbps >= 1000.0f) {
     return String(mbps / 1000.0f, 1) + "G";
@@ -1005,8 +1233,15 @@ void drawMetric(GFXcanvas16 &spr, int16_t x, int16_t y, const String &label, flo
                 uint16_t color) {
   uint16_t muted = rgb565(128, 141, 166);
   drawText(spr, x, y, label, muted);
+#ifdef XIAOMIAO
+  constexpr int16_t metricWidth = 72;
+  String value = percentText(percent);
+  drawText(spr, x + metricWidth - value.length() * 6, y, value, color);
+  drawProgressBar(spr, x, y + 12, metricWidth, 9, percent / 100.0f, color);
+#else
   drawText(spr, x + 42, y, percentText(percent), color);
   drawProgressBar(spr, x, y + 10, 69, 7, percent / 100.0f, color);
+#endif
 }
 
 void drawPerformancePage(GFXcanvas16 &spr) {
@@ -1043,14 +1278,33 @@ void drawPerformancePage(GFXcanvas16 &spr) {
   uint16_t loadColor = color565(config.performanceLoadColor);
   uint16_t rxColor = color565(config.performanceRxColor);
   uint16_t txColor = color565(config.performanceTxColor);
+#ifdef XIAOMIAO
+  constexpr int16_t contentWidth = SCREEN_W;
+  constexpr int16_t rightColumnX = 84;
+#else
   constexpr int16_t contentWidth = SCREEN_W - 7;
   constexpr int16_t rightColumnX = 80;
+#endif
 
   spr.fillRect(0, 0, contentWidth, 11, panel);
   drawText(spr, 4, 2, "PERF", cpuColor);
-  drawText(spr, 40, 2, performance.hostName.substring(0, 13), muted);
-  drawText(spr, contentWidth - 4 - 4 * 6, 2, WiFi.RSSI() > -67 ? "WiFi" : "wifi",
-           WiFi.RSSI() > -67 ? green : amber);
+  drawText(spr, 40, 2, performance.hostName.substring(0, (contentWidth - 74) / 6), muted);
+  drawRightText(spr, contentWidth - 2, 2, WiFi.RSSI() > -67 ? "WiFi" : "wifi",
+                WiFi.RSSI() > -67 ? green : amber);
+
+#ifdef XIAOMIAO
+  drawMetric(spr, 4, 18, "CPU", performance.displayCpu, cpuColor);
+  drawMetric(spr, rightColumnX, 18, config.memoryMetric == 1 ? "PRES" : "MEM",
+             performance.displayMemory, memoryColor);
+  drawMetric(spr, 4, 48, "DSK", performance.displayDisk, diskColor);
+  drawMetric(spr, rightColumnX, 48, "LOAD", performance.displayLoad, loadColor);
+  spr.fillRect(0, 78, contentWidth, 33, panel);
+  drawText(spr, 4, 81, "RX " + compactRate(performance.netRxMbps), rxColor);
+  drawText(spr, rightColumnX, 81, "TX " + compactRate(performance.netTxMbps), txColor);
+  drawText(spr, 4, 98, "UP " + compactUptime(performance.uptimeSeconds), muted);
+  drawCodexStatusIndicator(spr, SCREEN_W - 4, 0, SCREEN_H, true, true);
+  return;
+#endif
 
   drawMetric(spr, 4, 15, "CPU", performance.displayCpu, cpuColor);
   drawMetric(spr, rightColumnX, 15, config.memoryMetric == 1 ? "PRES" : "MEM",
@@ -1069,10 +1323,16 @@ void drawPerformancePage(GFXcanvas16 &spr) {
 void setup() {
 #ifdef XIAOMIAO
   Serial.begin(115200);
+  Serial.println("[Codex] XiaoMiao monitor starting");
   pinMode(22, OUTPUT);
   digitalWrite(22, HIGH); // Deselect the shared SPI SD reader, even without a card.
   pinMode(34, INPUT);
   pinMode(12, INPUT_PULLUP);
+  // Launcher wiring: Up=2, Down=13, Left=27, Right=35.
+  pinMode(2, INPUT_PULLUP);
+  pinMode(13, INPUT_PULLUP);
+  pinMode(27, INPUT_PULLUP);
+  pinMode(35, INPUT);
 #else
   pinMode(PIN_BLK, OUTPUT);
   backlightPwmReady = ledcAttach(PIN_BLK, BACKLIGHT_PWM_HZ, BACKLIGHT_PWM_BITS);
@@ -1082,7 +1342,10 @@ void setup() {
 
   SPI.begin(PIN_SCL, -1, PIN_SDA, PIN_CS);
 #ifdef XIAOMIAO
-  tft.initR(INITR_REDTAB);
+  // Adafruit aliases REDTAB and 144GREENTAB to 0x01, selecting a square panel.
+  // GREENTAB selects native 128x160; the XiaoMiao panel uses zero offsets.
+  tft.initR(INITR_GREENTAB);
+  tft.setPanelOffset(0, 0);
 #else
   tft.initR(INITR_MINI160x80);
 #endif
@@ -1099,6 +1362,12 @@ void setup() {
 #endif
   );
   tft.fillScreen(ST77XX_BLACK);
+#ifdef XIAOMIAO
+  Serial.printf("[Display] %dx%d rotation=%u ST7735 zero-offset\n", tft.width(), tft.height(), tft.getRotation());
+#endif
+#ifdef XM_STANDALONE_OTA
+  Serial.println(XM_OTA_MARKER);
+#endif
   writeBacklight(BACKLIGHT_MAX_DUTY);
 
   frameA.setTextSize(1);
@@ -1115,43 +1384,97 @@ void setup() {
 void loop() {
 #ifdef XIAOMIAO
   static bool previousA = false, previousB = false;
+  static bool previousUp = false, previousDown = false;
+  static bool previousLeft = false, previousRight = false;
   static uint32_t lastButton = 0, comboSince = 0;
   bool a = digitalRead(34) == LOW, b = digitalRead(12) == LOW;
+  bool up = digitalRead(2) == LOW, down = digitalRead(13) == LOW;
+  bool left = digitalRead(27) == LOW, right = digitalRead(35) == LOW;
   if (a && b) {
     if (!comboSince) comboSince = millis();
     if (millis() - comboSince > 1500) {
+#ifdef XM_STANDALONE_OTA
+      showOtaInfo = true;
+#else
       const esp_partition_t *launcher = esp_partition_find_first(
         ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_TEST, nullptr);
       if (launcher && esp_ota_set_boot_partition(launcher) == ESP_OK) ESP.restart();
+#endif
     }
   } else {
     comboSince = 0;
     if (millis() - lastButton > 200) {
       if (a && !previousA) {
-        config.displayMode = 1 - config.displayMode;
+        showOtaInfo = false;
+        config.displayMode = (config.displayMode + 1) % 3;
+        lastTrendFetchMs = 0;
+        footerUntilMs = millis() + 2500;
+        usagePageDirty = true;
+        sendDeviceStatus("status");
+        lastButton = millis();
+      } else if (config.displayMode == 2 &&
+                 (up && !previousUp || down && !previousDown ||
+                  left && !previousLeft || right && !previousRight)) {
+        if (up && !previousUp) {
+          trendWindowHours = trendWindowHours == 6 ? 24 : trendWindowHours == 12 ? 6 : 12;
+          lastTrendFetchMs = 0;
+        } else if (down && !previousDown) {
+          trendWindowHours = trendWindowHours == 6 ? 12 : trendWindowHours == 12 ? 24 : 6;
+          lastTrendFetchMs = 0;
+        } else if (left && !previousLeft) {
+          if (trendCount > 0 && trendCursor > 0) trendCursor--;
+        } else if (right && !previousRight) {
+          if (trendCount > 0 && trendCursor + 1 < trendCount) trendCursor++;
+        }
+        footerUntilMs = millis() + 2500;
+        usagePageDirty = true;
+        lastButton = millis();
+      } else if ((down && !previousDown) || (right && !previousRight)) {
+        config.displayMode = (config.displayMode + 1) % 3;
+        lastTrendFetchMs = 0;
+        footerUntilMs = millis() + 2500;
+        usagePageDirty = true;
+        sendDeviceStatus("status");
+        lastButton = millis();
+      } else if ((up && !previousUp) || (left && !previousLeft)) {
+        config.displayMode = (config.displayMode + 2) % 3;
+        lastTrendFetchMs = 0;
+        footerUntilMs = millis() + 2500;
         usagePageDirty = true;
         sendDeviceStatus("status");
         lastButton = millis();
       }
       if (b && !previousB) {
-        webSocket.disconnect();
-        wsStarted = false;
-        wsConnected = false;
+        showOtaInfo = false;
+        config.displayMode = (config.displayMode + 2) % 3;
+        lastTrendFetchMs = 0;
+        footerUntilMs = millis() + 2500;
         usagePageDirty = true;
+        sendDeviceStatus("status");
         lastButton = millis();
       }
     }
   }
   previousA = a;
   previousB = b;
+  previousUp = up;
+  previousDown = down;
+  previousLeft = left;
+  previousRight = right;
 #endif
   webServer.handleClient();
+#ifdef XM_STANDALONE_OTA
+  if (xmOtaReboot && millis() - xmOtaRebootAt > 1000) ESP.restart();
+#endif
   connectWifiIfNeeded();
   setupMdnsIfNeeded();
   setupWebSocketIfNeeded();
   if (wsStarted) {
     webSocket.loop();
   }
+#ifdef XIAOMIAO
+  fetchNasTrendIfNeeded();
+#endif
   updateWsFailSafe();
   if (wsConnected &&
       (lastDeviceStatusMs == 0 || millis() - lastDeviceStatusMs >= DEVICE_STATUS_MS)) {
@@ -1179,19 +1502,36 @@ void loop() {
     memcpy(frameB.getBuffer(), frameA.getBuffer(),
            SCREEN_W * SCREEN_H * sizeof(uint16_t));
     drawCodexStatusBar(frameB);
-  } else {
+  } else if (config.displayMode == 1) {
     drawPerformancePage(frameB);
+  } else {
+#ifdef XIAOMIAO
+    drawTrendPage(frameB);
+#else
+    drawPerformancePage(frameB);
+#endif
   }
 #ifdef XIAOMIAO
-  tft.drawRGBBitmap(0, 16, frameB.getBuffer(), SCREEN_W, SCREEN_H);
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
-  tft.setCursor(0, 2);
-  tft.print("XiaoMiao Codex Monitor");
-  tft.setCursor(0, 102);
-  tft.print("A:Page B:Reconnect");
-  tft.setCursor(0, 116);
-  tft.print("Hold A+B: Launcher");
+#ifdef XM_STANDALONE_OTA
+  if (showOtaInfo) {
+    frameB.fillScreen(ST77XX_BLACK);
+    drawText(frameB, 4, 8, "OTA UPDATE", ST77XX_CYAN, 2);
+    drawText(frameB, 4, 35, "http://" + WiFi.localIP().toString(), ST77XX_WHITE);
+    drawText(frameB, 4, 49, "/ota   User: admin", ST77XX_WHITE);
+    drawText(frameB, 4, 69, "Password:", ST77XX_CYAN);
+    drawText(frameB, 4, 84, XM_OTA_PASSWORD, ST77XX_WHITE);
+    drawText(frameB, 4, 103, "A: Back", ST77XX_WHITE);
+  }
+#endif
+  if (config.displayMode != 2 && millis() < footerUntilMs) {
+    frameB.fillRect(0, 116, SCREEN_W, 12, rgb565(18, 23, 34));
+#ifdef XM_STANDALONE_OTA
+    drawText(frameB, 3, 119, "A:Page B:Link AB:OTA", ST77XX_WHITE);
+#else
+    drawText(frameB, 3, 119, "A:Page  B:Link  AB:Exit", ST77XX_WHITE);
+#endif
+  }
+  tft.drawRGBBitmap(0, 0, frameB.getBuffer(), SCREEN_W, SCREEN_H);
 #else
   tft.drawRGBBitmap(0, 0, frameB.getBuffer(), SCREEN_W, SCREEN_H);
 #endif
