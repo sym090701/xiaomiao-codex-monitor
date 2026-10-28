@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import contextlib
 import copy
+import datetime as dt
 import json
 import math
 import os
@@ -10,6 +11,7 @@ from pathlib import Path
 import secrets
 import time
 import uuid
+from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from machw_archive import CodexUsageArchive, MacHardwareArchive
@@ -104,10 +106,17 @@ class Preheater:
 
     def status(self):
         cooldown_until = float(self.state.get("cooldown_until", 0) or 0)
+        last_turn_at = self.state.get("last_turn_at")
+        last_turn_local = ""
+        if isinstance(last_turn_at, (int, float)):
+            last_turn_local = dt.datetime.fromtimestamp(
+                last_turn_at, dt.timezone.utc).astimezone(
+                    ZoneInfo("Asia/Shanghai")).strftime("%m-%d %H:%M")
         return {"thread_id_present": bool(self.state.get("thread_id")),
                 "last_result": self.state.get("last_result"),
                 "last_error": self.state.get("last_error"),
                 "last_turn_at": self.state.get("last_turn_at"),
+                "last_turn_local": last_turn_local,
                 "cooldown_active": cooldown_until > time.time(),
                 "cooldown_remaining_seconds": max(0, int(cooldown_until - time.time()))}
 

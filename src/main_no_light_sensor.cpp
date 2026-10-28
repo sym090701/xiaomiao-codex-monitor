@@ -144,6 +144,7 @@ bool preheatCooldownActive = false;
 int32_t preheatCooldownSeconds = -1;
 String preheatLastResult;
 String preheatLastError;
+String preheatLastTurnText;
 #endif
 
 struct PerformanceState {
@@ -670,6 +671,7 @@ void fetchPreheatStatusIfNeeded() {
       preheatCooldownSeconds = doc["cooldown_remaining_seconds"] | -1;
       preheatLastResult = doc["last_result"] | "never";
       preheatLastError = doc["last_error"] | "";
+      preheatLastTurnText = doc["last_turn_local"] | "NEVER";
       usagePageDirty = true;
     }
   }
@@ -1279,14 +1281,16 @@ void drawPreheatPage(GFXcanvas16 &spr) {
            preheatThreadPresent ? green : amber);
   drawText(spr, 6, 42, "LAST", muted);
   drawText(spr, 84, 42, preheatLastResult.length() ? preheatLastResult : "never", text);
-  drawText(spr, 6, 62, "COOLDOWN", muted);
-  drawText(spr, 84, 62, preheatCooldownActive ? shortDuration(preheatCooldownSeconds) : "READY",
+  drawText(spr, 6, 58, "WHEN", muted);
+  drawText(spr, 84, 58, preheatLastTurnText.length() ? preheatLastTurnText : "NEVER", text);
+  drawText(spr, 6, 76, "COOLDOWN", muted);
+  drawText(spr, 84, 76, preheatCooldownActive ? shortDuration(preheatCooldownSeconds) : "READY",
            preheatCooldownActive ? amber : green);
   if (preheatLastError.length()) {
-    drawText(spr, 6, 82, "ERROR", muted);
-    drawText(spr, 48, 82, preheatLastError.substring(0, 18), amber);
+    drawText(spr, 6, 94, "ERROR", muted);
+    drawText(spr, 48, 94, preheatLastError.substring(0, 18), amber);
   }
-  drawText(spr, 6, 106, "Hold B 1.2s to preheat", muted);
+  drawText(spr, 6, 112, "Hold B 1.2s", muted);
 }
 #endif
 
