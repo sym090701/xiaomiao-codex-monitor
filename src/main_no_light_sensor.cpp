@@ -9,6 +9,7 @@
 #include <WebServer.h>
 #include <WebSocketsClient.h>
 #include <HTTPClient.h>
+#include <Wire.h>
 #include <WiFi.h>
 #ifdef XM_PRECONFIGURED
 #include "xiaomiao_boot_config.h"
@@ -139,6 +140,9 @@ String preheatMessage;
 uint32_t preheatMessageUntilMs = 0;
 volatile bool preheatInProgress = false;
 volatile int preheatHttpStatus = 0;
+bool preheatHardwareLed = false;
+uint32_t preheatLedUntilMs = 0;
+uint32_t preheatLedBlinkMs = 0;
 uint32_t lastPreheatStatusFetchMs = 0;
 bool preheatStatusReady = false;
 bool preheatThreadPresent = false;
@@ -635,6 +639,28 @@ void applyUsagePayload(JsonVariantConst doc) {
 }
 
 #ifdef XIAOMIAO
+void setHardwareLed(bool on) {
+  Wire.beginTransmission(0x40);
+  Wire.write(0xA0); // GD32 LED1 register
+  Wire.write(on ? 1 : 0);
+  Wire.endTransmission();
+  preheatHardwareLed = on;
+}
+
+void updatePreheatHardwareLed() {
+  if (preheatInProgress) {
+    if (!preheatLedBlinkMs || millis() - preheatLedBlinkMs >= 250) {
+      preheatLedBlinkMs = millis();
+      setHardwareLed(!preheatHardwareLed);
+    }
+  } else if (preheatLedUntilMs && millis() < preheatLedUntilMs) {
+    setHardwareLed(true);
+  } else if (preheatHardwareLed) {
+    preheatLedUntilMs = 0;
+    setHardwareLed(false);
+  }
+}
+
 void preheatHttpTask(void *argument) {
   String *url = static_cast<String *>(argument);
   HTTPClient http;
@@ -656,6 +682,9 @@ void requestPreheat() {
   }
   preheatMessage = "PREHEAT...";
   preheatMessageUntilMs = 0;
+  preheatLedUntilMs = 0;
+  preheatLedBlinkMs = 0;
+  setHardwareLed(true);
   preheatHttpStatus = 0;
   preheatInProgress = true;
   String *url = new String(String("http://") + config.usageHost + ":" +
@@ -665,6 +694,7 @@ void requestPreheat() {
     preheatInProgress = false;
     preheatMessage = "PREHEAT ERR";
     preheatMessageUntilMs = millis() + 4000;
+    preheatLedUntilMs = millis() + 4000;
   }
   usagePageDirty = true;
 }
@@ -1441,6 +1471,10 @@ void setup() {
 #endif
   writeBacklight(BACKLIGHT_MAX_DUTY);
   loadConfig();
+#ifdef XIAOMIAO
+  Wire.begin(21, 15);
+  setHardwareLed(false);
+#endif
 
   SPI.begin(PIN_SCL, -1, PIN_SDA, PIN_CS);
 #ifdef XIAOMIAO
@@ -1582,9 +1616,11 @@ void loop() {
     preheatHttpStatus = 0;
     preheatMessage = status == HTTP_CODE_OK ? "PREHEAT OK" : "PREHEAT ERR";
     preheatMessageUntilMs = millis() + 4000;
+    preheatLedUntilMs = millis() + 4000;
     Serial.printf("[Preheat] HTTP %d\n", status);
     usagePageDirty = true;
   }
+  updatePreheatHardwareLed();
 #endif
   updateWsFailSafe();
   if (wsConnected &&
