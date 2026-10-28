@@ -1470,91 +1470,74 @@ void loop() {
   static bool previousA = false, previousB = false;
   static bool previousUp = false, previousDown = false;
   static bool previousLeft = false, previousRight = false;
-  static uint32_t lastButton = 0, comboSince = 0;
-  static uint32_t bSince = 0;
-  static bool preheatTriggered = false;
+  static uint32_t lastButton = 0, aSince = 0, bSince = 0;
+  static bool comboHandled = false, bLongHandled = false;
   bool a = digitalRead(34) == LOW, b = digitalRead(12) == LOW;
   bool up = digitalRead(2) == LOW, down = digitalRead(13) == LOW;
   bool left = digitalRead(27) == LOW, right = digitalRead(35) == LOW;
+  uint32_t buttonNow = millis();
+  if (a && !previousA) aSince = buttonNow;
   if (b && !previousB) {
-    bSince = millis();
-    preheatTriggered = false;
+    bSince = buttonNow;
+    bLongHandled = false;
   }
-  if (!b) {
-    bSince = 0;
-    preheatTriggered = false;
-  } else if (!a && bSince && !preheatTriggered && millis() - bSince >= 1200) {
-    requestPreheat();
-    preheatTriggered = true;
-  }
-  if (a && b) {
-    if (!comboSince) comboSince = millis();
-    if (millis() - comboSince > 1500) {
+  if (a && b && !comboHandled && aSince && bSince &&
+      buttonNow - min(aSince, bSince) >= 1500) {
+    comboHandled = true;
 #ifdef XM_STANDALONE_OTA
-      showOtaInfo = true;
+    showOtaInfo = true;
 #else
-      const esp_partition_t *launcher = esp_partition_find_first(
+    const esp_partition_t *launcher = esp_partition_find_first(
         ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_TEST, nullptr);
-      if (launcher && esp_ota_set_boot_partition(launcher) == ESP_OK) ESP.restart();
+    if (launcher && esp_ota_set_boot_partition(launcher) == ESP_OK) ESP.restart();
 #endif
-    }
-  } else {
-    comboSince = 0;
-    if (millis() - lastButton > 200) {
-      if (a && !previousA) {
+  }
+  if (!a && !b && comboHandled) {
+    comboHandled = false;
+    aSince = bSince = 0;
+  }
+  if (!a && previousA && !comboHandled && aSince) {
+    if (buttonNow - aSince < 1200 && buttonNow - lastButton > 200) {
 #ifdef XM_STANDALONE_OTA
-        showOtaInfo = false;
+      showOtaInfo = false;
 #endif
-        config.displayMode = (config.displayMode + 1) % 4;
-        lastTrendFetchMs = 0;
-        footerUntilMs = millis() + 2500;
-        usagePageDirty = true;
-        sendDeviceStatus("status");
-        lastButton = millis();
-      } else if (config.displayMode == 2 &&
-                 (up && !previousUp || down && !previousDown ||
-                  left && !previousLeft || right && !previousRight)) {
-        if (up && !previousUp) {
-          trendWindowHours = trendWindowHours == 3 ? 24 : 3;
-          lastTrendFetchMs = 0;
-        } else if (down && !previousDown) {
-          trendWindowHours = trendWindowHours == 3 ? 24 : 3;
-          lastTrendFetchMs = 0;
-        } else if (left && !previousLeft) {
-          if (trendCount > 0 && trendCursor > 0) trendCursor--;
-        } else if (right && !previousRight) {
-          if (trendCount > 0 && trendCursor + 1 < trendCount) trendCursor++;
-        }
-        footerUntilMs = millis() + 2500;
-        usagePageDirty = true;
-        lastButton = millis();
-      } else if ((down && !previousDown) || (right && !previousRight)) {
-        config.displayMode = (config.displayMode + 1) % 4;
-        lastTrendFetchMs = 0;
-        footerUntilMs = millis() + 2500;
-        usagePageDirty = true;
-        sendDeviceStatus("status");
-        lastButton = millis();
-      } else if ((up && !previousUp) || (left && !previousLeft)) {
+      config.displayMode = (config.displayMode + 1) % 4;
+      lastTrendFetchMs = 0;
+      usagePageDirty = true;
+      sendDeviceStatus("status");
+      lastButton = buttonNow;
+    }
+    aSince = 0;
+  }
+  if (!b && previousB && !comboHandled && bSince) {
+    uint32_t held = buttonNow - bSince;
+    if (!bLongHandled && buttonNow - lastButton > 200) {
+      if (held >= 1200) {
+        requestPreheat();
+        bLongHandled = true;
+      } else {
         config.displayMode = (config.displayMode + 3) % 4;
         lastTrendFetchMs = 0;
-        footerUntilMs = millis() + 2500;
         usagePageDirty = true;
         sendDeviceStatus("status");
-        lastButton = millis();
-      }
-      if (b && !previousB) {
-#ifdef XM_STANDALONE_OTA
-        showOtaInfo = false;
-#endif
-        config.displayMode = (config.displayMode + 3) % 4;
-        lastTrendFetchMs = 0;
-        footerUntilMs = millis() + 2500;
-        usagePageDirty = true;
-        sendDeviceStatus("status");
-        lastButton = millis();
+        lastButton = buttonNow;
       }
     }
+    bSince = 0;
+  }
+  if (!comboHandled && config.displayMode == 2 && buttonNow - lastButton > 200 &&
+      ((up && !previousUp) || (down && !previousDown) ||
+       (left && !previousLeft) || (right && !previousRight))) {
+    if (up && !previousUp || down && !previousDown) {
+      trendWindowHours = trendWindowHours == 3 ? 24 : 3;
+      lastTrendFetchMs = 0;
+    } else if (left && !previousLeft) {
+      if (trendCount > 0 && trendCursor > 0) trendCursor--;
+    } else if (right && !previousRight) {
+      if (trendCount > 0 && trendCursor + 1 < trendCount) trendCursor++;
+    }
+    usagePageDirty = true;
+    lastButton = buttonNow;
   }
   previousA = a;
   previousB = b;
