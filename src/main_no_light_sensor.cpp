@@ -1629,10 +1629,6 @@ void loop() {
 #endif
   }
 #ifdef XIAOMIAO
-  if (preheatInProgress) {
-    uint16_t lamp = ((millis() / 250UL) & 1) ? rgb565(255, 150, 40) : rgb565(80, 45, 15);
-    frameB.fillRect(0, 0, SCREEN_W, 4, lamp);
-  }
 #ifdef XM_STANDALONE_OTA
   if (showOtaInfo) {
     frameB.fillScreen(ST77XX_BLACK);
