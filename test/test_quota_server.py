@@ -1,6 +1,8 @@
 import unittest
+import tempfile
 from unittest.mock import patch
 from quota_server import normalize, Collector, create_app
+from pathlib import Path
 from aiohttp.test_utils import TestClient, TestServer
 
 
@@ -73,3 +75,35 @@ class TransportTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(payload["type"], "snapshot")
                     self.assertTrue(payload["screen_on"])
                     self.assertFalse(payload["performance"]["ok"])
+
+
+class AutoPreheatTest(unittest.IsolatedAsyncioTestCase):
+    async def test_auto_requires_active_falling_rate_and_recent_reset(self):
+        collector = Collector("unused", 60)
+        collector.payload = {"ok": True, "five_hour": {"reset_at_epoch": 900}}
+        collector.updated = 920
+        collector.failed = False
+        collector._active_rate = 1.25
+        with tempfile.TemporaryDirectory() as directory:
+            collector.preheater.state_file = Path(directory) / "state.json"
+            collector.preheater.auto_mode = "armed"
+            collector.preheater.auto_reset_grace_seconds = 90
+            with patch("quota_server.time.time", return_value=920), \
+                    patch.object(collector.preheater, "run", return_value={"ok": True}) as run:
+                result = await collector.preheater.maybe_auto(collector)
+            self.assertEqual(result, {"ok": True})
+            run.assert_awaited_once_with(collector, source="auto")
+
+    async def test_auto_ignores_flat_trend(self):
+        collector = Collector("unused", 60)
+        collector.payload = {"ok": True, "five_hour": {"reset_at_epoch": 900}}
+        collector.updated = 920
+        collector._active_rate = 0.01
+        with tempfile.TemporaryDirectory() as directory:
+            collector.preheater.state_file = Path(directory) / "state.json"
+            collector.preheater.auto_mode = "armed"
+            with patch("quota_server.time.time", return_value=920), \
+                    patch.object(collector.preheater, "run") as run:
+                result = await collector.preheater.maybe_auto(collector)
+            self.assertIsNone(result)
+            run.assert_not_called()

@@ -21,6 +21,10 @@ Environment=CODEXLOGS_SSH_KEY=/var/lib/xiaomiao-quota/.ssh/machwlogs_sync_ed2551
 Environment=CODEXLOGS_KNOWN_HOSTS=/var/lib/xiaomiao-quota/.ssh/known_hosts
 Environment=CODEXLOGS_SYNC_INTERVAL=60
 Environment=ARCHIVE_TIMEZONE=Asia/Shanghai
+Environment=PREHEAT_AUTO_MODE=armed
+Environment=PREHEAT_AUTO_MIN_RATE_PERCENT_HOUR=0.5
+Environment=PREHEAT_AUTO_RESET_GRACE_SECONDS=90
+Environment=PREHEAT_AUTO_RETRY_SECONDS=1800
 ExecStart=/opt/xiaomiao-quota/.venv/bin/python /opt/xiaomiao-quota/quota_server.py --host 192.168.1.153 --port 8765 --codex /opt/xiaomiao-quota/bin/codex
 Restart=on-failure
 RestartSec=10

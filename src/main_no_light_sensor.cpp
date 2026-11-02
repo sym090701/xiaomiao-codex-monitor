@@ -151,6 +151,8 @@ int32_t preheatCooldownSeconds = -1;
 String preheatLastResult;
 String preheatLastError;
 String preheatLastTurnText;
+bool preheatAutoEnabled = false;
+String preheatAutoReason;
 #endif
 
 struct PerformanceState {
@@ -720,6 +722,8 @@ void fetchPreheatStatusIfNeeded() {
       preheatLastResult = doc["last_result"] | "never";
       preheatLastError = doc["last_error"] | "";
       preheatLastTurnText = doc["last_turn_local"] | "NEVER";
+      preheatAutoEnabled = (String(doc["auto_mode"] | "off") == "armed");
+      preheatAutoReason = doc["auto_reason"] | "";
       usagePageDirty = true;
     }
   }
@@ -1323,7 +1327,9 @@ void drawPreheatPage(GFXcanvas16 &spr) {
   uint16_t text = rgb565(220, 225, 235);
   spr.fillRect(0, 0, SCREEN_W, 12, rgb565(18, 23, 34));
   drawText(spr, 4, 2, "PREHEAT", cyan);
-  drawRightText(spr, 158, 2, preheatStatusReady ? "LIVE" : "WAIT", muted);
+  drawRightText(spr, 158, 2, preheatAutoEnabled ? "AUTO" :
+                (preheatStatusReady ? "MAN" : "WAIT"),
+                preheatAutoEnabled ? green : muted);
   drawText(spr, 6, 22, "THREAD", muted);
   drawText(spr, 84, 22, preheatThreadPresent ? "READY" : "NONE",
            preheatThreadPresent ? green : amber);
@@ -1338,7 +1344,7 @@ void drawPreheatPage(GFXcanvas16 &spr) {
     drawText(spr, 6, 94, "ERROR", muted);
     drawText(spr, 48, 94, preheatLastError.substring(0, 18), amber);
   }
-  drawText(spr, 6, 112, "Hold B 1.2s", muted);
+  drawText(spr, 6, 112, preheatAutoEnabled ? "AUTO ARMED" : "Hold B 1.2s", muted);
 }
 #endif
 

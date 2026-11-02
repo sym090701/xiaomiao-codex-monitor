@@ -11,6 +11,7 @@ from pathlib import Path
 import secrets
 import time
 import uuid
+from collections import deque
 from zoneinfo import ZoneInfo
 
 from aiohttp import web
@@ -90,6 +91,15 @@ class Preheater:
             "PREHEAT_STATE_FILE", "/var/lib/xiaomiao-quota/preheat.json"))
         self.lock = asyncio.Lock()
         self.state = self._load()
+        self.auto_mode = os.environ.get("PREHEAT_AUTO_MODE", "off").strip().lower()
+        if self.auto_mode not in ("off", "armed"):
+            self.auto_mode = "off"
+        self.auto_retry_seconds = max(300, int(os.environ.get(
+            "PREHEAT_AUTO_RETRY_SECONDS", "1800")))
+        self.auto_min_rate = max(0.05, float(os.environ.get(
+            "PREHEAT_AUTO_MIN_RATE_PERCENT_HOUR", "0.5")))
+        self.auto_reset_grace_seconds = max(0, int(os.environ.get(
+            "PREHEAT_AUTO_RESET_GRACE_SECONDS", "90")))
 
     def _load(self):
         try:
@@ -118,7 +128,21 @@ class Preheater:
                 "last_turn_at": self.state.get("last_turn_at"),
                 "last_turn_local": last_turn_local,
                 "cooldown_active": cooldown_until > time.time(),
-                "cooldown_remaining_seconds": max(0, int(cooldown_until - time.time()))}
+                "cooldown_remaining_seconds": max(0, int(cooldown_until - time.time())),
+                "auto_mode": self.auto_mode,
+                "auto_rate_percent_hour": self.state.get("auto_rate_percent_hour"),
+                "auto_last_result": self.state.get("auto_last_result"),
+                "auto_last_error": self.state.get("auto_last_error"),
+                "auto_last_turn_local": self._local_time(self.state.get("auto_last_turn_at")),
+                "auto_reason": self.state.get("auto_reason", "")}
+
+    @staticmethod
+    def _local_time(epoch):
+        if isinstance(epoch, (int, float)):
+            return dt.datetime.fromtimestamp(
+                epoch, dt.timezone.utc).astimezone(
+                    ZoneInfo("Asia/Shanghai")).strftime("%m-%d %H:%M")
+        return ""
 
     async def _rpc(self, proc, request_id, method, params):
         proc.stdin.write((json.dumps({"id": request_id, "method": method,
@@ -135,13 +159,18 @@ class Preheater:
                 raise RuntimeError("Codex preheat request failed")
             return message.get("result", {})
 
-    async def run(self, collector):
+    async def run(self, collector, source="manual"):
         async with self.lock:
             now = time.time()
             cooldown_until = float(self.state.get("cooldown_until", 0) or 0)
             if now < cooldown_until:
                 return {"ok": False, "status": "cooldown",
                         "retry_after_seconds": int(cooldown_until - now)}
+            if source == "auto":
+                reset_at = ((collector.payload.get("five_hour") or {})
+                            .get("reset_at_epoch"))
+                if not isinstance(reset_at, (int, float)) or reset_at > now:
+                    return {"ok": False, "status": "waiting_reset"}
             if not collector.payload.get("ok"):
                 return {"ok": False, "status": "quota_unavailable"}
             proc = await asyncio.create_subprocess_exec(
@@ -195,16 +224,27 @@ class Preheater:
                 collector.updated, collector.failed = captured, False
                 collector.codex_archive.record(fresh, captured)
                 reset_at = (fresh.get("five_hour") or {}).get("reset_at_epoch")
-                self.state = {"thread_id": thread_id, "last_turn_at": captured,
-                              "cooldown_until": reset_at if isinstance(reset_at, (int, float))
-                              else captured + 18000,
-                              "last_result": "completed"}
+                self.state.update({"thread_id": thread_id, "last_turn_at": captured,
+                                   "cooldown_until": reset_at if isinstance(reset_at, (int, float))
+                                   else captured + 18000,
+                                   "last_result": "completed", "last_error": ""})
+                if source == "auto":
+                    self.state.update({"auto_last_turn_at": captured,
+                                       "auto_last_result": "completed",
+                                       "auto_last_error": "",
+                                       "auto_retry_after": 0,
+                                       "auto_reason": "reset_and_active_trend"})
                 self._save()
                 return {"ok": True, "status": "completed", "thread_id": thread_id,
                         "reset_at_epoch": reset_at}
             except Exception as exc:
                 self.state["last_result"] = "failed"
                 self.state["last_error"] = type(exc).__name__
+                if source == "auto":
+                    self.state.update({"auto_last_turn_at": time.time(),
+                                       "auto_last_result": "failed",
+                                       "auto_last_error": type(exc).__name__,
+                                       "auto_retry_after": time.time() + self.auto_retry_seconds})
                 self._save()
                 return {"ok": False, "status": "failed"}
             finally:
@@ -212,6 +252,41 @@ class Preheater:
                     proc.terminate()
                     with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(proc.wait(), 3)
+
+    async def maybe_auto(self, collector):
+        """Trigger only after a 5h window ended and the recent trend is active.
+
+        This deliberately does not preheat on a flat/idle graph. It uses the
+        last measured falling slope, so a server restart does not immediately
+        spend quota just because auto mode is enabled.
+        """
+        if self.auto_mode != "armed":
+            return None
+        now = time.time()
+        rate = collector.active_rate_percent_hour()
+        self.state["auto_rate_percent_hour"] = round(rate, 3)
+        self.state["auto_reason"] = ""
+        if rate < self.auto_min_rate:
+            self.state["auto_reason"] = "flat_or_idle_trend"
+            self._save()
+            return None
+        if not collector.payload.get("ok") or collector.failed or collector.updated is None:
+            self.state["auto_reason"] = "quota_snapshot_stale"
+            self._save()
+            return None
+        window = collector.payload.get("five_hour") or {}
+        reset_at = window.get("reset_at_epoch")
+        if not isinstance(reset_at, (int, float)) or reset_at > now or now - reset_at > self.auto_reset_grace_seconds:
+            self.state["auto_reason"] = "waiting_for_recent_reset"
+            self._save()
+            return None
+        retry_after = float(self.state.get("auto_retry_after", 0) or 0)
+        if now < retry_after:
+            self.state["auto_reason"] = "retry_cooldown"
+            return None
+        self.state["auto_reason"] = "reset_and_active_trend"
+        self._save()
+        return await self.run(collector, source="auto")
 
 
 def validate_metrics(payload):
@@ -245,6 +320,27 @@ class Collector:
         self.archive = MacHardwareArchive.from_env()
         self.codex_archive = CodexUsageArchive.from_env()
         self.preheater = Preheater(binary)
+        self._usage_samples = deque(maxlen=240)
+        self._active_rate = 0.0
+
+    def record_usage_sample(self, usage, captured):
+        window = usage.get("five_hour") or {}
+        remaining = window.get("remaining_percent")
+        if isinstance(remaining, (int, float)) and math.isfinite(remaining):
+            self._usage_samples.append((captured, float(remaining)))
+            if len(self._usage_samples) >= 2:
+                previous_at, previous_remaining = self._usage_samples[-2]
+                delta_seconds = captured - previous_at
+                drop = previous_remaining - float(remaining)
+                # Ignore reset jumps and flat data. Keep the latest meaningful
+                # falling segment so auto-preheat still works just after reset.
+                if 30 <= delta_seconds <= 900 and drop > 0.05:
+                    instant_rate = drop * 3600.0 / delta_seconds
+                    self._active_rate = (instant_rate if not self._active_rate else
+                                         0.65 * self._active_rate + 0.35 * instant_rate)
+
+    def active_rate_percent_hour(self):
+        return max(0.0, float(self._active_rate))
 
     def performance(self):
         if self.mac_seen is None or time.monotonic() - self.mac_seen > 45:
@@ -259,6 +355,7 @@ class Collector:
                 captured = time.time()
                 self.payload = fresh
                 self.updated, self.failed = captured, False
+                self.record_usage_sample(fresh, captured)
                 self.codex_archive.record(fresh, captured)
             except (OSError, RuntimeError, ValueError, KeyError, asyncio.TimeoutError):
                 self.failed = True
@@ -336,8 +433,23 @@ def create_app(collector, ingest_token=None):
             with contextlib.suppress(asyncio.CancelledError, ConnectionError):
                 await task
         return ws
+
+    async def auto_preheat_loop():
+        # Run independently of HTTP requests and the device. The Ubuntu
+        # service remains the source of truth while XiaoMiao is asleep.
+        while True:
+            try:
+                if collector.preheater.auto_mode == "armed":
+                    await collector.preheater.maybe_auto(collector)
+            except (OSError, RuntimeError, ValueError, KeyError,
+                    asyncio.TimeoutError):
+                # Polling must continue even if a preheat attempt fails.
+                pass
+            await asyncio.sleep(30)
+
     async def lifetime(_app):
         task = asyncio.create_task(collector.poll())
+        auto_task = asyncio.create_task(auto_preheat_loop())
         sync_tasks = []
         if collector.archive.enabled:
             sync_tasks.append(asyncio.create_task(collector.archive.sync_loop()))
@@ -345,10 +457,13 @@ def create_app(collector, ingest_token=None):
             sync_tasks.append(asyncio.create_task(collector.codex_archive.sync_loop()))
         yield
         task.cancel()
+        auto_task.cancel()
         for sync_task in sync_tasks:
             sync_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        with contextlib.suppress(asyncio.CancelledError):
+            await auto_task
         for sync_task in sync_tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await sync_task

@@ -32,6 +32,25 @@ sudo -u xiaomiao-quota env HOME=/var/lib/xiaomiao-quota \
 没有 agent 或 45 秒未收到上报时显示 Mac 离线，不使用服务器负载代替 Mac 性能。
 Mac 休眠不会影响服务器继续查询，但服务器本身必须保持开机和联网。
 
+## 自动预热
+
+服务默认以 `PREHEAT_AUTO_MODE=armed` 启用保守自动预热。调度器只在同时满足以下条件时发送一次最小真实请求：
+
+1. 最近成功采样中出现持续下降的 5 小时额度斜率；平坦数据和额度重置跳变会被忽略。
+2. 5 小时窗口刚刚结束（默认宽限 90 秒），避免在旧窗口仍有效时提前消耗。
+3. 预热冷却已结束，且上次自动失败的重试冷却已结束。
+
+默认有效斜率阈值为 `0.5%/小时`，自动失败后 30 分钟内不会重复尝试。参数可通过 systemd 覆盖：
+
+```ini
+Environment=PREHEAT_AUTO_MODE=off
+Environment=PREHEAT_AUTO_MIN_RATE_PERCENT_HOUR=0.5
+Environment=PREHEAT_AUTO_RESET_GRACE_SECONDS=90
+Environment=PREHEAT_AUTO_RETRY_SECONDS=1800
+```
+
+`armed` 表示允许真实请求，`off` 表示仅保留手动长按 B。状态接口会返回 `auto_reason`、最近斜率和自动执行结果；`completed` 表示专用对话 turn 完成，不等同于上游额度接口提供了额外保证。
+
 ## Codex 用量趋势归档
 
 Codex 用量成功查询后，会另外追加到本地 `codexuselogs-spool/YYYY-MM-DD.ndjson`，
