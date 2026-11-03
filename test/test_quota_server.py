@@ -78,27 +78,63 @@ class TransportTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AutoPreheatTest(unittest.IsolatedAsyncioTestCase):
-    async def test_auto_requires_active_falling_rate_and_recent_reset(self):
+    async def test_auto_triggers_at_prediction_without_current_consumption(self):
         collector = Collector("unused", 60)
         collector.payload = {"ok": True, "five_hour": {"reset_at_epoch": 900}}
         collector.updated = 920
         collector.failed = False
-        collector._active_rate = 1.25
+        collector._active_rate = 0
         with tempfile.TemporaryDirectory() as directory:
             collector.preheater.state_file = Path(directory) / "state.json"
             collector.preheater.auto_mode = "armed"
-            collector.preheater.auto_reset_grace_seconds = 90
+            collector.preheater._prediction_cache = {"predicted_at_epoch": 920 + 12600}
+            collector.preheater._prediction_checked = 10**15
             with patch("quota_server.time.time", return_value=920), \
                     patch.object(collector.preheater, "run", return_value={"ok": True}) as run:
                 result = await collector.preheater.maybe_auto(collector)
             self.assertEqual(result, {"ok": True})
             run.assert_awaited_once_with(collector, source="auto")
+            with patch("quota_server.time.time", return_value=920), \
+                    patch.object(collector.preheater, "run") as duplicate:
+                await collector.preheater.maybe_auto(collector)
+                duplicate.assert_not_called()
 
-    async def test_auto_ignores_flat_trend(self):
+    async def test_auto_does_not_guess_when_history_is_insufficient(self):
         collector = Collector("unused", 60)
         collector.payload = {"ok": True, "five_hour": {"reset_at_epoch": 900}}
         collector.updated = 920
         collector._active_rate = 0.01
+        with tempfile.TemporaryDirectory() as directory:
+            collector.preheater.state_file = Path(directory) / "state.json"
+            collector.preheater.auto_mode = "armed"
+            with patch("quota_server.time.time", return_value=920), \
+                    patch.object(collector.preheater, "run", return_value={"ok": True}) as run:
+                result = await collector.preheater.maybe_auto(collector)
+            self.assertIsNone(result)
+            run.assert_not_called()
+            self.assertEqual(collector.preheater.state["auto_reason"], "insufficient_history")
+
+    async def test_auto_waits_or_skips_when_outside_trigger_window(self):
+        collector = Collector("unused", 60)
+        collector.payload = {"ok": True, "five_hour": {"reset_at_epoch": 900}}
+        collector.updated = 920
+        with tempfile.TemporaryDirectory() as directory:
+            collector.preheater.state_file = Path(directory) / "state.json"
+            collector.preheater.auto_mode = "armed"
+            collector.preheater._prediction_checked = 10**15
+            for predicted, reason in [(920 + 12601, "waiting_for_prediction"),
+                                      (920 + 12600 - 601, "prediction_window_missed")]:
+                collector.preheater._prediction_cache = {"predicted_at_epoch": predicted}
+                with patch("quota_server.time.time", return_value=920), \
+                        patch.object(collector.preheater, "run") as run:
+                    await collector.preheater.maybe_auto(collector)
+                    run.assert_not_called()
+                self.assertEqual(collector.preheater.state["auto_reason"], reason)
+
+    async def test_auto_skips_an_active_window(self):
+        collector = Collector("unused", 60)
+        collector.payload = {"ok": True, "five_hour": {"reset_at_epoch": 2000}}
+        collector.updated = 920
         with tempfile.TemporaryDirectory() as directory:
             collector.preheater.state_file = Path(directory) / "state.json"
             collector.preheater.auto_mode = "armed"

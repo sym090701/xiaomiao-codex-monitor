@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from aiohttp import web
 from machw_archive import CodexUsageArchive, MacHardwareArchive
+from usage_predictor import predict_usage
 
 
 def normalize(result, now=None):
@@ -96,10 +97,16 @@ class Preheater:
             self.auto_mode = "off"
         self.auto_retry_seconds = max(300, int(os.environ.get(
             "PREHEAT_AUTO_RETRY_SECONDS", "1800")))
-        self.auto_min_rate = max(0.05, float(os.environ.get(
-            "PREHEAT_AUTO_MIN_RATE_PERCENT_HOUR", "0.5")))
-        self.auto_reset_grace_seconds = max(0, int(os.environ.get(
-            "PREHEAT_AUTO_RESET_GRACE_SECONDS", "90")))
+        self.auto_daily_limit = max(1, int(os.environ.get(
+            "PREHEAT_AUTO_DAILY_LIMIT", "1")))
+        self.auto_lead_seconds = max(0, int(os.environ.get(
+            "PREHEAT_AUTO_LEAD_SECONDS", "12600")))
+        self.auto_history_days = max(7, min(90, int(os.environ.get(
+            "PREHEAT_AUTO_HISTORY_DAYS", "28"))))
+        self.auto_min_events = max(3, int(os.environ.get(
+            "PREHEAT_AUTO_MIN_EVENTS", "3")))
+        self._prediction_cache = None
+        self._prediction_checked = 0
 
     def _load(self):
         try:
@@ -134,7 +141,12 @@ class Preheater:
                 "auto_last_result": self.state.get("auto_last_result"),
                 "auto_last_error": self.state.get("auto_last_error"),
                 "auto_last_turn_local": self._local_time(self.state.get("auto_last_turn_at")),
-                "auto_reason": self.state.get("auto_reason", "")}
+                "auto_reason": self.state.get("auto_reason", ""),
+                "auto_lead_hours": self.auto_lead_seconds / 3600,
+                "auto_prediction": self.state.get("auto_prediction"),
+                "auto_prediction_local": self._local_time(
+                    (self.state.get("auto_prediction") or {}).get("predicted_at_epoch")),
+                "auto_due_local": self._local_time(self.state.get("auto_due_at"))}
 
     @staticmethod
     def _local_time(epoch):
@@ -169,10 +181,15 @@ class Preheater:
             if source == "auto":
                 reset_at = ((collector.payload.get("five_hour") or {})
                             .get("reset_at_epoch"))
-                if not isinstance(reset_at, (int, float)) or reset_at > now:
+                if isinstance(reset_at, (int, float)) and reset_at > now:
                     return {"ok": False, "status": "waiting_reset"}
             if not collector.payload.get("ok"):
                 return {"ok": False, "status": "quota_unavailable"}
+            # Persist the attempt before starting a process. Failed/uncertain
+            # turns must not produce a duplicate request after a restart.
+            self.state.setdefault("preheat_events", []).append(now)
+            self.state["preheat_events"] = self.state["preheat_events"][-180:]
+            self._save()
             proc = await asyncio.create_subprocess_exec(
                 self.binary, "app-server", stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
@@ -222,7 +239,7 @@ class Preheater:
                 captured = time.time()
                 collector.payload = fresh
                 collector.updated, collector.failed = captured, False
-                collector.codex_archive.record(fresh, captured)
+                collector.codex_archive.record(fresh, captured, record_type="codex_preheat")
                 reset_at = (fresh.get("five_hour") or {}).get("reset_at_epoch")
                 self.state.update({"thread_id": thread_id, "last_turn_at": captured,
                                    "cooldown_until": reset_at if isinstance(reset_at, (int, float))
@@ -233,7 +250,7 @@ class Preheater:
                                        "auto_last_result": "completed",
                                        "auto_last_error": "",
                                        "auto_retry_after": 0,
-                                       "auto_reason": "reset_and_active_trend"})
+                                       "auto_reason": "completed"})
                 self._save()
                 return {"ok": True, "status": "completed", "thread_id": thread_id,
                         "reset_at_epoch": reset_at}
@@ -254,39 +271,76 @@ class Preheater:
                         await asyncio.wait_for(proc.wait(), 3)
 
     async def maybe_auto(self, collector):
-        """Trigger only after a 5h window ended and the recent trend is active.
-
-        This deliberately does not preheat on a flat/idle graph. It uses the
-        last measured falling slope, so a server restart does not immediately
-        spend quota just because auto mode is enabled.
-        """
+        """Preheat 3.5 hours before a sufficiently supported usage prediction."""
         if self.auto_mode != "armed":
             return None
         now = time.time()
         rate = collector.active_rate_percent_hour()
         self.state["auto_rate_percent_hour"] = round(rate, 3)
         self.state["auto_reason"] = ""
-        if rate < self.auto_min_rate:
-            self.state["auto_reason"] = "flat_or_idle_trend"
-            self._save()
-            return None
-        if not collector.payload.get("ok") or collector.failed or collector.updated is None:
+        if (not collector.payload.get("ok") or collector.failed or collector.updated is None
+                or now - collector.updated > collector.interval * 3):
             self.state["auto_reason"] = "quota_snapshot_stale"
             self._save()
             return None
+        if self._prediction_cache is None or time.monotonic() - self._prediction_checked >= 300:
+            excluded = self.state.get("preheat_events", []) + [
+                self.state.get("last_turn_at"), self.state.get("auto_last_turn_at")]
+            self._prediction_cache = await asyncio.to_thread(
+                predict_usage, collector.codex_archive.local_dir, now,
+                self.auto_history_days, self.auto_min_events, excluded)
+            self._prediction_checked = time.monotonic()
+        prediction = self._prediction_cache
+        self.state["auto_prediction"] = prediction
+        predicted_at = prediction.get("predicted_at_epoch")
+        self.state["auto_due_at"] = (predicted_at - self.auto_lead_seconds
+                                     if predicted_at is not None else None)
         window = collector.payload.get("five_hour") or {}
         reset_at = window.get("reset_at_epoch")
-        if not isinstance(reset_at, (int, float)) or reset_at > now or now - reset_at > self.auto_reset_grace_seconds:
-            self.state["auto_reason"] = "waiting_for_recent_reset"
+        if isinstance(reset_at, (int, float)) and reset_at > now:
+            self.state["auto_reason"] = "active_window"
+            self._save()
+            return None
+        if predicted_at is None:
+            self.state["auto_reason"] = "insufficient_history"
+            self._save()
+            return None
+        due_at = self.state["auto_due_at"]
+        if now < due_at or now > due_at + 600:
+            self.state["auto_reason"] = ("waiting_for_prediction" if now < due_at
+                                         else "prediction_window_missed")
+            self._save()
+            return None
+        if self.state.get("auto_attempted_prediction") == predicted_at:
+            self.state["auto_reason"] = "prediction_already_attempted"
+            self._save()
+            return None
+        local_date = dt.datetime.fromtimestamp(
+            now, dt.timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        if self.state.get("auto_daily_date") != local_date:
+            self.state["auto_daily_date"] = local_date
+            self.state["auto_daily_count"] = 0
+        if int(self.state.get("auto_daily_count", 0) or 0) >= self.auto_daily_limit:
+            self.state["auto_reason"] = "daily_limit"
             self._save()
             return None
         retry_after = float(self.state.get("auto_retry_after", 0) or 0)
         if now < retry_after:
             self.state["auto_reason"] = "retry_cooldown"
             return None
-        self.state["auto_reason"] = "reset_and_active_trend"
+        if now < float(self.state.get("cooldown_until", 0) or 0):
+            self.state["auto_reason"] = "cooldown"
+            self._save()
+            return None
+        self.state["auto_reason"] = "prediction_due"
+        self.state["auto_attempted_prediction"] = predicted_at
+        self.state["auto_daily_count"] = int(self.state.get("auto_daily_count", 0) or 0) + 1
         self._save()
-        return await self.run(collector, source="auto")
+        result = await self.run(collector, source="auto")
+        if result.get("ok"):
+            self.state["auto_reason"] = "completed"
+            self._save()
+        return result
 
 
 def validate_metrics(payload):
@@ -332,8 +386,8 @@ class Collector:
                 previous_at, previous_remaining = self._usage_samples[-2]
                 delta_seconds = captured - previous_at
                 drop = previous_remaining - float(remaining)
-                # Ignore reset jumps and flat data. Keep the latest meaningful
-                # falling segment so auto-preheat still works just after reset.
+                # Ignore reset jumps and flat data. The falling segment is
+                # diagnostic only; scheduling uses archived usage habits.
                 if 30 <= delta_seconds <= 900 and drop > 0.05:
                     instant_rate = drop * 3600.0 / delta_seconds
                     self._active_rate = (instant_rate if not self._active_rate else

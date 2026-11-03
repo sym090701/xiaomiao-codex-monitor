@@ -153,11 +153,11 @@ class CodexUsageArchive(JsonlRsyncArchive):
                    interval=int(os.environ.get("CODEXLOGS_SYNC_INTERVAL", "60")),
                    timezone_name=os.environ.get("ARCHIVE_TIMEZONE", "Asia/Shanghai"))
 
-    def record(self, usage, captured_epoch=None):
+    def record(self, usage, captured_epoch=None, record_type="codex_usage"):
         if not self.enabled:
             return
         captured_epoch = captured_epoch or dt.datetime.now(dt.timezone.utc).timestamp()
         stamp = dt.datetime.fromtimestamp(captured_epoch, self.timezone)
-        row = self._metadata(captured_epoch, "codex_usage")
+        row = self._metadata(captured_epoch, record_type)
         row["usage"] = usage
         self._append(self.local_dir / (stamp.date().isoformat() + ".ndjson"), row)

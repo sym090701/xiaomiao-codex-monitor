@@ -34,22 +34,33 @@ Mac 休眠不会影响服务器继续查询，但服务器本身必须保持开�
 
 ## 自动预热
 
-服务默认以 `PREHEAT_AUTO_MODE=armed` 启用保守自动预热。调度器只在同时满足以下条件时发送一次最小真实请求：
+服务模板以 `PREHEAT_AUTO_MODE=armed` 启用历史预测预热，目标是**预计使用前 3.5 小时**发送专用对话的最小真实请求。例如预计 09:00 使用，在 05:30 预热；预计次日 01:00 使用，在前一天 21:30 预热。
 
-1. 最近成功采样中出现持续下降的 5 小时额度斜率；平坦数据和额度重置跳变会被忽略。
-2. 5 小时窗口刚刚结束（默认宽限 90 秒），避免在旧窗口仍有效时提前消耗。
-3. 预热冷却已结束，且上次自动失败的重试冷却已结束。
+预测由 Ubuntu 上的 `usage_predictor.py` 计算，读取 `CODEXLOGS_LOCAL_DIR` 的原始归档；这些是同步到 NAS 的同一份数据。本版不是在 NAS 上执行预测，NAS 的折线图计算服务保持独立。读取放在线程中执行，每 5 分钟更新一次预测，不阻塞实时用量查询。部署时需同时安装 `quota_server.py`、`machw_archive.py`、`usage_predictor.py`。
 
-默认有效斜率阈值为 `0.5%/小时`，自动失败后 30 分钟内不会重复尝试。参数可通过 systemd 覆盖：
+学习规则：
+
+1. 回看最近 28 天（`Asia/Shanghai`），识别相邻有效采样中的额度下降；间隔超过 15 分钟不推测中间发生的活动。
+2. 空闲至少 1 小时后的下降视为新会话，每个历史日期只采用首次观测到的开始时间；平坦数据不作为使用证据，当天未结束的数据暂不进入训练。
+3. 优先同一星期几，样本不足时按工作日/周末汇总。至少 3 个不同日期的开始时间聚集在一个 90 分钟时段内，并占该组使用日的至少 60%，才取该簇中位数预测今天或明天的使用时间。
+4. 预热产生的归档标记为 `record_type=codex_preheat`，并保存尝试时间；其前后 10 分钟的下降不参与学习，避免学习自己的自动请求。升级前无标记的旧数据只能利用状态文件保留的最近一次预热时间排除，无法精确还原所有旧预热。
+
+执行规则：当前快照须新鲜，5 小时窗口须不存在或已到期，冷却须结束。后台每 30 秒检查，到预测时间减 12600 秒时执行；最多允许延迟 10 分钟，超过后跳过，不在快开用时补发。每次预测只尝试一次，每天最多尝试一次，失败/重启也不重复同一预测。没有足够历史、习惯分散或采样断档时不乱猜，也没有默认固定时间兜底。当前消耗斜率不是触发条件，因此当天尚未开始使用也能触发。
+
+参数可通过 systemd 覆盖，修改后执行 `systemctl daemon-reload && systemctl restart xiaomiao-quota`：
 
 ```ini
-Environment=PREHEAT_AUTO_MODE=off
-Environment=PREHEAT_AUTO_MIN_RATE_PERCENT_HOUR=0.5
-Environment=PREHEAT_AUTO_RESET_GRACE_SECONDS=90
+Environment=PREHEAT_AUTO_MODE=armed
+Environment=PREHEAT_AUTO_LEAD_SECONDS=12600
+Environment=PREHEAT_AUTO_HISTORY_DAYS=28
+Environment=PREHEAT_AUTO_MIN_EVENTS=3
 Environment=PREHEAT_AUTO_RETRY_SECONDS=1800
+Environment=PREHEAT_AUTO_DAILY_LIMIT=1
 ```
 
-`armed` 表示允许真实请求，`off` 表示仅保留手动长按 B。状态接口会返回 `auto_reason`、最近斜率和自动执行结果；`completed` 表示专用对话 turn 完成，不等同于上游额度接口提供了额外保证。
+`armed` 表示允许真实请求，`off` 表示仅保留手动长按 B。状态接口 `/api/preheat/status` 保持原有鉴权，新增 `auto_lead_hours`、`auto_prediction_local`、`auto_due_local`；`auto_prediction` 中包含预测 epoch、支持天数、观测天数及分组依据。主要 `auto_reason`：`insufficient_history` 等待学习、`waiting_for_prediction` 等待触发点、`active_window` 当前窗口仍有效、`prediction_window_missed` 错过触发点、`prediction_already_attempted` 同一预测已尝试、`daily_limit` 已达当日上限、`completed` 已完成真实 turn。
+
+该估计只预测首次观测到的日常使用时段，不识别具体设备或对话；百分比粒度、长时间连续使用和历史缺测会影响预测。`completed` 表示专用对话 turn 完成，不保证上游额度窗口一定按预期建立。若上游确实从预热起算 5 小时，那么提前 3.5 小时会使预计开用时距该窗口结束约剩 1.5 小时，不会增加总额度。
 
 ## Codex 用量趋势归档
 
