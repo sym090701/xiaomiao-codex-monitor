@@ -179,9 +179,11 @@ class Preheater:
                 return {"ok": False, "status": "cooldown",
                         "retry_after_seconds": int(cooldown_until - now)}
             if source == "auto":
-                reset_at = ((collector.payload.get("five_hour") or {})
-                            .get("reset_at_epoch"))
-                if isinstance(reset_at, (int, float)) and reset_at > now:
+                window = collector.payload.get("five_hour") or {}
+                reset_at = window.get("reset_at_epoch")
+                used = window.get("used_percent")
+                if (isinstance(reset_at, (int, float)) and reset_at > now
+                        and isinstance(used, (int, float)) and used > 0):
                     return {"ok": False, "status": "waiting_reset"}
             if not collector.payload.get("ok"):
                 return {"ok": False, "status": "quota_unavailable"}
@@ -297,7 +299,9 @@ class Preheater:
                                      if predicted_at is not None else None)
         window = collector.payload.get("five_hour") or {}
         reset_at = window.get("reset_at_epoch")
-        if isinstance(reset_at, (int, float)) and reset_at > now:
+        used = window.get("used_percent")
+        if (isinstance(reset_at, (int, float)) and reset_at > now
+                and isinstance(used, (int, float)) and used > 0):
             self.state["auto_reason"] = "active_window"
             self._save()
             return None

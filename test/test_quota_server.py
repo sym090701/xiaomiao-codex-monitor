@@ -133,7 +133,7 @@ class AutoPreheatTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_auto_skips_an_active_window(self):
         collector = Collector("unused", 60)
-        collector.payload = {"ok": True, "five_hour": {"reset_at_epoch": 2000}}
+        collector.payload = {"ok": True, "five_hour": {"used_percent": 5, "reset_at_epoch": 2000}}
         collector.updated = 920
         with tempfile.TemporaryDirectory() as directory:
             collector.preheater.state_file = Path(directory) / "state.json"
@@ -143,3 +143,19 @@ class AutoPreheatTest(unittest.IsolatedAsyncioTestCase):
                 result = await collector.preheater.maybe_auto(collector)
             self.assertIsNone(result)
             run.assert_not_called()
+
+    async def test_auto_does_not_treat_empty_future_reset_as_active(self):
+        collector = Collector("unused", 60)
+        collector.payload = {"ok": True, "five_hour": {
+            "used_percent": 0, "reset_at_epoch": 2000}}
+        collector.updated = 920
+        with tempfile.TemporaryDirectory() as directory:
+            collector.preheater.state_file = Path(directory) / "state.json"
+            collector.preheater.auto_mode = "armed"
+            collector.preheater._prediction_cache = {"predicted_at_epoch": 920 + 12600}
+            collector.preheater._prediction_checked = 10**15
+            with patch("quota_server.time.time", return_value=920), \
+                    patch.object(collector.preheater, "run", return_value={"ok": True}) as run:
+                result = await collector.preheater.maybe_auto(collector)
+            self.assertEqual(result, {"ok": True})
+            run.assert_awaited_once_with(collector, source="auto")
