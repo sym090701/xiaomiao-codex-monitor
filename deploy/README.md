@@ -24,6 +24,9 @@ sudo -u xiaomiao-quota env HOME=/var/lib/xiaomiao-quota \
 完成后安装 `xiaomiao-quota.service` 至 `/etc/systemd/system/`，执行
 `systemctl daemon-reload` 和 `systemctl enable --now xiaomiao-quota`。
 模板绑定 `192.168.1.153:8765`，其他机器需修改地址。
+服务源码应由 `xiaomiao-quota:xiaomiao-quota` 持有、权限 `0640`；若以 root
+替换 `/opt/xiaomiao-quota/*.py`，替换后必须恢复这个属主和权限，否则 systemd
+会因 `ProtectHome`/服务用户无读权限而反复重启。
 
 小喵现有固件无需更改协议：在设备配网页填写服务器地址 `192.168.1.153`，
 端口 `8765`。它读取 `/ws`；`/health` 和 `/usage` 用于诊断。
