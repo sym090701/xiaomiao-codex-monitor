@@ -142,7 +142,10 @@ class Preheater:
                 "auto_last_error": self.state.get("auto_last_error"),
                 "auto_last_turn_local": self._local_time(self.state.get("auto_last_turn_at")),
                 "auto_reason": self.state.get("auto_reason", ""),
-                "auto_lead_hours": self.auto_lead_seconds / 3600,
+                "auto_lead_hours": round(float(self.state.get(
+                    "auto_effective_lead_seconds", self.auto_lead_seconds)) / 3600, 2),
+                "auto_lead_basis": self.state.get("auto_lead_basis", "safe_default"),
+                "auto_duration_hours": self.state.get("auto_duration_hours"),
                 "auto_prediction": self.state.get("auto_prediction"),
                 "auto_prediction_local": self._local_time(
                     (self.state.get("auto_prediction") or {}).get("predicted_at_epoch")),
@@ -295,7 +298,11 @@ class Preheater:
         prediction = self._prediction_cache
         self.state["auto_prediction"] = prediction
         predicted_at = prediction.get("predicted_at_epoch")
-        self.state["auto_due_at"] = (predicted_at - self.auto_lead_seconds
+        lead_seconds = int(prediction.get("lead_seconds", self.auto_lead_seconds))
+        self.state["auto_effective_lead_seconds"] = lead_seconds
+        self.state["auto_lead_basis"] = prediction.get("lead_basis", "safe_default")
+        self.state["auto_duration_hours"] = prediction.get("duration_hours")
+        self.state["auto_due_at"] = (predicted_at - lead_seconds
                                      if predicted_at is not None else None)
         window = collector.payload.get("five_hour") or {}
         reset_at = window.get("reset_at_epoch")

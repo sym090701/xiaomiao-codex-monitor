@@ -153,6 +153,8 @@ String preheatLastError;
 String preheatLastTurnText;
 bool preheatAutoEnabled = false;
 String preheatAutoReason;
+float preheatAutoLeadHours = -1.0f;
+String preheatAutoLeadBasis;
 #endif
 
 struct PerformanceState {
@@ -713,7 +715,7 @@ void fetchPreheatStatusIfNeeded() {
   http.setTimeout(3500);
   int status = http.GET();
   if (status == HTTP_CODE_OK) {
-    DynamicJsonDocument doc(2048);
+    DynamicJsonDocument doc(4096);
     if (deserializeJson(doc, http.getString()) == DeserializationError::Ok) {
       preheatStatusReady = true;
       preheatThreadPresent = doc["thread_id_present"] | false;
@@ -724,6 +726,8 @@ void fetchPreheatStatusIfNeeded() {
       preheatLastTurnText = doc["last_turn_local"] | "NEVER";
       preheatAutoEnabled = (String(doc["auto_mode"] | "off") == "armed");
       preheatAutoReason = doc["auto_reason"] | "";
+      preheatAutoLeadHours = doc["auto_lead_hours"] | -1.0f;
+      preheatAutoLeadBasis = doc["auto_lead_basis"] | "";
       usagePageDirty = true;
     }
   }
@@ -1340,11 +1344,17 @@ void drawPreheatPage(GFXcanvas16 &spr) {
   drawText(spr, 6, 76, "COOLDOWN", muted);
   drawText(spr, 84, 76, preheatCooldownActive ? shortDuration(preheatCooldownSeconds) : "READY",
            preheatCooldownActive ? amber : green);
-  if (preheatLastError.length()) {
-    drawText(spr, 6, 94, "ERROR", muted);
-    drawText(spr, 48, 94, preheatLastError.substring(0, 18), amber);
+  drawText(spr, 6, 94, "LEAD", muted);
+  if (preheatAutoEnabled && preheatAutoLeadHours >= 0.0f) {
+    String lead = String(preheatAutoLeadHours, 1) + "H";
+    if (preheatAutoLeadBasis == "historical_duration") lead += " DYN";
+    drawText(spr, 84, 94, lead.substring(0, 12), cyan);
+  } else if (preheatLastError.length()) {
+    drawText(spr, 84, 94, preheatLastError.substring(0, 12), amber);
+  } else {
+    drawText(spr, 84, 94, "--", muted);
   }
-  drawText(spr, 6, 112, preheatAutoEnabled ? "AUTO ARMED" : "Hold B 1.2s", muted);
+  drawText(spr, 6, 112, preheatAutoEnabled ? preheatAutoReason.substring(0, 20) : "Hold B 1.2s", muted);
 }
 #endif
 

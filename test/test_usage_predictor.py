@@ -24,6 +24,16 @@ class UsagePredictorTest(unittest.TestCase):
                      usage={"five_hour": {"remaining_percent": 98 if preheat else 99}})]
         Path(root, day + ".ndjson").write_text("\n".join(json.dumps(row) for row in rows))
 
+    def write_complete_day(self, root, day, hour=9, duration_minutes=90):
+        start = self.epoch(day + "T%02d:00:00" % hour)
+        rows = []
+        for minute in range(duration_minutes + 1):
+            rows.append(dict(observed_at_epoch=start + minute * 60,
+                             record_type="codex_usage",
+                             usage={"five_hour": {
+                                 "remaining_percent": 100 - minute}}))
+        Path(root, day + ".ndjson").write_text("\n".join(json.dumps(row) for row in rows))
+
     def test_workday_prediction_with_three_distinct_days(self):
         with tempfile.TemporaryDirectory() as root:
             for day in ["2026-10-28", "2026-10-29", "2026-10-30"]:
@@ -54,3 +64,12 @@ class UsagePredictorTest(unittest.TestCase):
                 self.write_day(root, day, hour=hour)
             result = predict_usage(root, self.epoch("2026-11-03T05:30:00"))
             self.assertIsNone(result["predicted_at_epoch"])
+
+    def test_dynamic_lead_uses_complete_session_duration(self):
+        with tempfile.TemporaryDirectory() as root:
+            for day in ["2026-10-06", "2026-10-13", "2026-10-20", "2026-10-27"]:
+                self.write_complete_day(root, day, duration_minutes=90)
+            result = predict_usage(root, self.epoch("2026-11-03T05:30:00"))
+            self.assertEqual(result["lead_basis"], "historical_duration")
+            self.assertEqual(result["duration_hours"], 1.48)
+            self.assertEqual(result["lead_seconds"], 13500)
