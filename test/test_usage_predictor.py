@@ -68,8 +68,8 @@ class UsagePredictorTest(unittest.TestCase):
     def test_dynamic_lead_uses_complete_session_duration(self):
         with tempfile.TemporaryDirectory() as root:
             for day in ["2026-10-06", "2026-10-13", "2026-10-20", "2026-10-27"]:
-                self.write_complete_day(root, day, duration_minutes=90)
+                self.write_complete_day(root, day, duration_minutes=80)
             result = predict_usage(root, self.epoch("2026-11-03T05:30:00"))
             self.assertEqual(result["lead_basis"], "historical_duration")
-            self.assertEqual(result["duration_hours"], 1.48)
-            self.assertEqual(result["lead_seconds"], 13500)
+            self.assertEqual(result["duration_hours"], 1.32)
+            self.assertEqual(result["lead_seconds"], 14100)

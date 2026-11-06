@@ -74,12 +74,16 @@ def predict_usage(root, now, history_days=28, min_events=3, excluded=()):
                     if drop > 0.05:
                         active_seconds += elapsed
                         active_drop += drop
-                    # A 90 percentage-point fall is a complete enough session
-                    # to estimate how long this user's window remains useful.
-                    if start_remaining - remaining >= 90:
-                        duration_by_date[date] = (epoch - start_epoch,
-                                                  active_drop, active_seconds)
-                        break
+                    # Estimate the wall-clock time to an 80-point fall from
+                    # any meaningful session. Flat intervals stay in wall
+                    # time but never dilute the instantaneous slope.
+                    wall_seconds = epoch - start_epoch
+                    if (active_drop >= 10 and active_seconds >= 600 and
+                            wall_seconds >= 600):
+                        estimate = wall_seconds * 80.0 / active_drop
+                        if 3600 <= estimate <= 18000:
+                            duration_by_date[date] = (estimate,
+                                                      active_drop, active_seconds)
             previous = (epoch, remaining)
     empty["observed_days"] = len(observed_dates)
     candidates = []

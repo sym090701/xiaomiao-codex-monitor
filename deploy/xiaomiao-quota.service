@@ -27,6 +27,7 @@ Environment=PREHEAT_AUTO_HISTORY_DAYS=28
 Environment=PREHEAT_AUTO_MIN_EVENTS=3
 Environment=PREHEAT_AUTO_RETRY_SECONDS=1800
 Environment=PREHEAT_AUTO_DAILY_LIMIT=1
+Environment=PREHEAT_TURN_TIMEOUT_SECONDS=180
 ExecStart=/opt/xiaomiao-quota/.venv/bin/python /opt/xiaomiao-quota/quota_server.py --host 192.168.1.153 --port 8765 --codex /opt/xiaomiao-quota/bin/codex
 Restart=on-failure
 RestartSec=10

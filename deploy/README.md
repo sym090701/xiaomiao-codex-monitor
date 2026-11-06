@@ -62,7 +62,7 @@ Environment=PREHEAT_AUTO_RETRY_SECONDS=1800
 Environment=PREHEAT_AUTO_DAILY_LIMIT=1
 ```
 
-`armed` 表示允许真实请求，`off` 表示仅保留手动长按 B。状态接口 `/api/preheat/status` 保持原有鉴权，新增 `auto_lead_hours`、`auto_lead_basis`、`auto_duration_hours`、`auto_prediction_local`、`auto_due_local`；`auto_lead_basis=historical_duration` 表示动态倒推，`safe_default` 表示回退 3.5 小时。主要 `auto_reason`：`insufficient_history` 等待学习、`waiting_for_prediction` 等待触发点、`active_window` 当前窗口仍有效、`prediction_window_missed` 错过触发点、`prediction_already_attempted` 同一预测已尝试、`daily_limit` 已达当日上限、`completed` 已完成真实 turn。
+`armed` 表示允许真实请求，`off` 表示仅保留手动长按 B。状态接口 `/api/preheat/status` 保持原有鉴权，新增 `auto_lead_hours`、`auto_lead_basis`、`auto_duration_hours`、`auto_prediction_local`、`auto_due_local`、`preheat_phase`、`preheat_last_phase`、`auto_retry_count`；`auto_lead_basis=historical_duration` 表示动态倒推，`safe_default` 表示回退 3.5 小时。turn 等待默认 180 秒，可由 `PREHEAT_TURN_TIMEOUT_SECONDS` 覆盖。超时错误会记录为 `TimeoutError@thread_resume`、`TimeoutError@turn_wait` 等阶段标记；同一预测只允许一次 30 分钟后的延迟重试，避免无限重复请求。
 
 该估计只预测首次观测到的日常使用时段，不识别具体设备或对话；百分比粒度、长时间连续使用和历史缺测会影响预测。`completed` 表示专用对话 turn 完成，不保证上游额度窗口一定按预期建立。若上游确实从预热起算 5 小时，那么提前 3.5 小时会使预计开用时距该窗口结束约剩 1.5 小时，不会增加总额度。
 

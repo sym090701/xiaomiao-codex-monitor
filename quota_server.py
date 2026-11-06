@@ -105,6 +105,8 @@ class Preheater:
             "PREHEAT_AUTO_HISTORY_DAYS", "28"))))
         self.auto_min_events = max(3, int(os.environ.get(
             "PREHEAT_AUTO_MIN_EVENTS", "3")))
+        self.turn_timeout_seconds = max(90, int(os.environ.get(
+            "PREHEAT_TURN_TIMEOUT_SECONDS", "180")))
         self._prediction_cache = None
         self._prediction_checked = 0
 
@@ -146,6 +148,9 @@ class Preheater:
                     "auto_effective_lead_seconds", self.auto_lead_seconds)) / 3600, 2),
                 "auto_lead_basis": self.state.get("auto_lead_basis", "safe_default"),
                 "auto_duration_hours": self.state.get("auto_duration_hours"),
+                "preheat_phase": self.state.get("preheat_phase", "idle"),
+                "preheat_last_phase": self.state.get("preheat_last_phase", ""),
+                "auto_retry_count": self.state.get("auto_retry_count", 0),
                 "auto_prediction": self.state.get("auto_prediction"),
                 "auto_prediction_local": self._local_time(
                     (self.state.get("auto_prediction") or {}).get("predicted_at_epoch")),
@@ -159,7 +164,10 @@ class Preheater:
                     ZoneInfo("Asia/Shanghai")).strftime("%m-%d %H:%M")
         return ""
 
-    async def _rpc(self, proc, request_id, method, params):
+    async def _rpc(self, proc, request_id, method, params, phase=None):
+        if phase:
+            self.state["preheat_phase"] = phase
+            self._save()
         proc.stdin.write((json.dumps({"id": request_id, "method": method,
                                       "params": params}) + "\n").encode())
         await proc.stdin.drain()
@@ -201,7 +209,7 @@ class Preheater:
             try:
                 await self._rpc(proc, 1, "initialize", {"clientInfo": {
                     "name": "xiaomiao_preheater", "title": "XiaoMiao quota preheater",
-                    "version": "0.1.0"}})
+                    "version": "0.1.0"}}, phase="initialize")
                 proc.stdin.write(b'{"method":"initialized","params":{}}\n')
                 await proc.stdin.drain()
                 thread_id = self.state.get("thread_id")
@@ -212,20 +220,25 @@ class Preheater:
                         "approvalPolicy": "never",
                         "developerInstructions":
                             "This is a quota preheat thread. Never use tools or modify files. Reply only OK.",
-                    })
+                    }, phase="thread_start")
                     thread_id = result.get("thread", {}).get("id")
                     if not thread_id:
                         raise RuntimeError("Codex preheat thread was not created")
                 else:
-                    await self._rpc(proc, 2, "thread/resume", {"threadId": thread_id})
+                    await self._rpc(proc, 2, "thread/resume", {"threadId": thread_id},
+                                    phase="thread_resume")
                 turn_id = str(uuid.uuid4())
+                self.state["preheat_phase"] = "turn_start"
+                self._save()
                 proc.stdin.write((json.dumps({"id": 3, "method": "turn/start",
                     "params": {"threadId": thread_id, "input": [{
                         "type": "text", "text": "你好。请只回复 OK，不要调用工具，不要修改文件。"}],
                         "approvalPolicy": "never", "clientUserMessageId": turn_id}}) + "\n").encode())
                 await proc.stdin.drain()
                 completed = False
-                async with asyncio.timeout(90):
+                self.state["preheat_phase"] = "turn_wait"
+                self._save()
+                async with asyncio.timeout(self.turn_timeout_seconds):
                     while True:
                         line = await proc.stdout.readline()
                         if not line:
@@ -240,6 +253,8 @@ class Preheater:
                             break
                 if not completed:
                     raise RuntimeError("Codex preheat turn incomplete")
+                self.state["preheat_phase"] = "quota_refresh"
+                self._save()
                 fresh = await read_limits(self.binary)
                 captured = time.time()
                 collector.payload = fresh
@@ -249,7 +264,8 @@ class Preheater:
                 self.state.update({"thread_id": thread_id, "last_turn_at": captured,
                                    "cooldown_until": reset_at if isinstance(reset_at, (int, float))
                                    else captured + 18000,
-                                   "last_result": "completed", "last_error": ""})
+                                   "last_result": "completed", "last_error": "",
+                                   "preheat_phase": "idle", "preheat_last_phase": "completed"})
                 if source == "auto":
                     self.state.update({"auto_last_turn_at": captured,
                                        "auto_last_result": "completed",
@@ -259,13 +275,31 @@ class Preheater:
                 self._save()
                 return {"ok": True, "status": "completed", "thread_id": thread_id,
                         "reset_at_epoch": reset_at}
-            except Exception as exc:
+            except asyncio.TimeoutError:
+                phase = self.state.get("preheat_phase", "unknown")
+                error = "TimeoutError@" + phase
                 self.state["last_result"] = "failed"
-                self.state["last_error"] = type(exc).__name__
+                self.state["last_error"] = error
+                self.state["preheat_last_phase"] = phase
+                self.state["preheat_phase"] = "idle"
                 if source == "auto":
                     self.state.update({"auto_last_turn_at": time.time(),
                                        "auto_last_result": "failed",
-                                       "auto_last_error": type(exc).__name__,
+                                       "auto_last_error": error,
+                                       "auto_retry_after": time.time() + self.auto_retry_seconds})
+                self._save()
+                return {"ok": False, "status": "failed", "error": error}
+            except Exception as exc:
+                phase = self.state.get("preheat_phase", "unknown")
+                error = type(exc).__name__ + "@" + phase
+                self.state["last_result"] = "failed"
+                self.state["last_error"] = error
+                self.state["preheat_last_phase"] = phase
+                self.state["preheat_phase"] = "idle"
+                if source == "auto":
+                    self.state.update({"auto_last_turn_at": time.time(),
+                                       "auto_last_result": "failed",
+                                       "auto_last_error": error,
                                        "auto_retry_after": time.time() + self.auto_retry_seconds})
                 self._save()
                 return {"ok": False, "status": "failed"}
@@ -322,7 +356,9 @@ class Preheater:
                                          else "prediction_window_missed")
             self._save()
             return None
-        if self.state.get("auto_attempted_prediction") == predicted_at:
+        already_attempted = self.state.get("auto_attempted_prediction") == predicted_at
+        retry_count = int(self.state.get("auto_retry_count", 0) or 0)
+        if already_attempted and retry_count >= 1:
             self.state["auto_reason"] = "prediction_already_attempted"
             self._save()
             return None
@@ -331,7 +367,8 @@ class Preheater:
         if self.state.get("auto_daily_date") != local_date:
             self.state["auto_daily_date"] = local_date
             self.state["auto_daily_count"] = 0
-        if int(self.state.get("auto_daily_count", 0) or 0) >= self.auto_daily_limit:
+        if (not already_attempted and
+                int(self.state.get("auto_daily_count", 0) or 0) >= self.auto_daily_limit):
             self.state["auto_reason"] = "daily_limit"
             self._save()
             return None
@@ -343,12 +380,18 @@ class Preheater:
             self.state["auto_reason"] = "cooldown"
             self._save()
             return None
-        self.state["auto_reason"] = "prediction_due"
+        self.state["auto_reason"] = "retry_due" if already_attempted else "prediction_due"
         self.state["auto_attempted_prediction"] = predicted_at
-        self.state["auto_daily_count"] = int(self.state.get("auto_daily_count", 0) or 0) + 1
+        if already_attempted:
+            self.state["auto_retry_count"] = 1
+        else:
+            self.state["auto_retry_count"] = 0
+            self.state["auto_daily_count"] = int(self.state.get("auto_daily_count", 0) or 0) + 1
         self._save()
         result = await self.run(collector, source="auto")
-        if result.get("ok"):
+        if isinstance(result, dict) and result.get("ok") is True:
+            self.state["auto_retry_count"] = 1
+            self.state["auto_retry_after"] = 0
             self.state["auto_reason"] = "completed"
             self._save()
         return result
