@@ -4,7 +4,7 @@ set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PYTHON_BIN=${PYTHON_BIN:-python3}
-HOST=${HOST:-0.0.0.0}
+HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-8080}
 PID_FILE="$ROOT_DIR/.codex-usage.pid"
 LOG_FILE="$ROOT_DIR/.codex-usage.log"

@@ -119,7 +119,7 @@ HOST=192.168.1.20 PORT=8080 PYTHON_BIN="$PWD/.venv/bin/python" ./server.sh start
 
 Mac 浏览器打开 `http://Mac的局域网IP:8080` 查看状态面板（与上面的 HOST 一致）。首次交互式启动会询问是否安装 Codex Hook；Hook 是可选的，只用于显示当前 Codex 会话状态，不参与用量读取。检查或移除 Hook 可运行 `./server.sh hook-status` 或 `./server.sh uninstall-hook`。
 
-服务接口没有设备认证。只在可信的家庭/个人局域网使用；不要绑定公网网卡、配置路由器端口转发或把 8080 暴露到互联网。不要把 `auth.json`、日志、运行配置或 Wi-Fi 凭据提交到仓库。
+服务默认只监听 `127.0.0.1`；只有明确设置 `HOST=Mac局域网IP` 才暴露给小喵。局域网模式仍建议配合防火墙/反向代理认证，绝不要端口转发到公网。Hook 只接受 `CODEX_HOME` 下的 transcript，并限制活动会话和读取字节数。不要把 `auth.json`、日志、运行配置或 Wi-Fi 凭据提交到仓库。
 
 ## 检查
 

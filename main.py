@@ -521,6 +521,10 @@ class PushService:
         }
         self.desired_config = self._load_desired_config()
         self.codex_sessions = {}
+        self.codex_session_limit = max(8, int(os.environ.get("CODEX_HOOK_SESSION_LIMIT", "64")))
+        self.codex_transcript_limit = max(4096, int(os.environ.get(
+            "CODEX_HOOK_TRANSCRIPT_BYTES", "65536")))
+        self.codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser().resolve()
         self.codex_status = {
             "state": "stopped",
             "event": "Stop",
@@ -582,10 +586,19 @@ class PushService:
         else:
             previous = self.codex_sessions.get(session_id, {})
             path = transcript_path or previous.get("transcript_path")
+            if path:
+                path_obj = Path(path).expanduser()
+                try:
+                    path = str(path_obj.resolve(strict=False).relative_to(self.codex_home))
+                    path = str(self.codex_home / path)
+                except (OSError, ValueError):
+                    raise ValueError("transcript_path outside CODEX_HOME")
+            if session_id not in self.codex_sessions and len(self.codex_sessions) >= self.codex_session_limit:
+                raise OverflowError("too many active Codex sessions")
             transcript_offset = previous.get("transcript_offset", 0)
             if transcript_path:
                 try:
-                    transcript_offset = Path(transcript_path).stat().st_size
+                    transcript_offset = Path(path).stat().st_size
                 except OSError:
                     transcript_offset = 0
             self.codex_sessions[session_id] = {
@@ -606,7 +619,12 @@ class PushService:
             try:
                 with Path(transcript_path).open("rb") as transcript:
                     transcript.seek(session.get("transcript_offset", 0))
+                    bytes_read = 0
                     for raw_line in transcript:
+                        bytes_read += len(raw_line)
+                        if bytes_read > self.codex_transcript_limit:
+                            completed_sessions.append(session_id)
+                            break
                         try:
                             record = json.loads(raw_line)
                         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -798,9 +816,18 @@ async def api_codex_hook(request):
     event = payload.get("event")
     if event not in CODEX_HOOK_STATES:
         raise web.HTTPBadRequest(text="unsupported hook event")
-    service.update_codex_status(
-        event, payload.get("session_id"), payload.get("transcript_path")
-    )
+    session_id = payload.get("session_id")
+    transcript_path = payload.get("transcript_path")
+    if not isinstance(session_id, (str, int)) or len(str(session_id)) > 128:
+        raise web.HTTPBadRequest(text="invalid session_id")
+    if transcript_path is not None and (not isinstance(transcript_path, str) or len(transcript_path) > 1024):
+        raise web.HTTPBadRequest(text="invalid transcript_path")
+    try:
+        service.update_codex_status(event, session_id, transcript_path)
+    except ValueError as exc:
+        raise web.HTTPBadRequest(text=str(exc))
+    except OverflowError as exc:
+        raise web.HTTPTooManyRequests(text=str(exc), headers={"Retry-After": "60"})
     await service.broadcast({"type": "codex_status", "codex": service.codex_status})
     return web.json_response({"ok": True, "codex": service.codex_status})
 

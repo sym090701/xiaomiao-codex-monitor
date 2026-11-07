@@ -97,6 +97,8 @@ class Preheater:
             self.auto_mode = "off"
         self.auto_retry_seconds = max(300, int(os.environ.get(
             "PREHEAT_AUTO_RETRY_SECONDS", "1800")))
+        self.failure_cooldown_seconds = max(60, int(os.environ.get(
+            "PREHEAT_FAILURE_COOLDOWN_SECONDS", "1800")))
         self.auto_daily_limit = max(1, int(os.environ.get(
             "PREHEAT_AUTO_DAILY_LIMIT", "1")))
         self.auto_lead_seconds = max(0, int(os.environ.get(
@@ -151,6 +153,8 @@ class Preheater:
                 "preheat_phase": self.state.get("preheat_phase", "idle"),
                 "preheat_last_phase": self.state.get("preheat_last_phase", ""),
                 "auto_retry_count": self.state.get("auto_retry_count", 0),
+                "failure_cooldown_remaining_seconds": max(0, int(
+                    float(self.state.get("failure_cooldown_until", 0) or 0) - time.time())),
                 "auto_prediction": self.state.get("auto_prediction"),
                 "auto_prediction_local": self._local_time(
                     (self.state.get("auto_prediction") or {}).get("predicted_at_epoch")),
@@ -189,6 +193,10 @@ class Preheater:
             if now < cooldown_until:
                 return {"ok": False, "status": "cooldown",
                         "retry_after_seconds": int(cooldown_until - now)}
+            failure_until = float(self.state.get("failure_cooldown_until", 0) or 0)
+            if now < failure_until:
+                return {"ok": False, "status": "failure_cooldown",
+                        "retry_after_seconds": int(failure_until - now)}
             if source == "auto":
                 window = collector.payload.get("five_hour") or {}
                 reset_at = window.get("reset_at_epoch")
@@ -265,7 +273,8 @@ class Preheater:
                                    "cooldown_until": reset_at if isinstance(reset_at, (int, float))
                                    else captured + 18000,
                                    "last_result": "completed", "last_error": "",
-                                   "preheat_phase": "idle", "preheat_last_phase": "completed"})
+                                   "preheat_phase": "idle", "preheat_last_phase": "completed",
+                                   "failure_cooldown_until": 0})
                 if source == "auto":
                     self.state.update({"auto_last_turn_at": captured,
                                        "auto_last_result": "completed",
@@ -282,6 +291,7 @@ class Preheater:
                 self.state["last_error"] = error
                 self.state["preheat_last_phase"] = phase
                 self.state["preheat_phase"] = "idle"
+                self.state["failure_cooldown_until"] = time.time() + self.failure_cooldown_seconds
                 if source == "auto":
                     self.state.update({"auto_last_turn_at": time.time(),
                                        "auto_last_result": "failed",
@@ -296,6 +306,7 @@ class Preheater:
                 self.state["last_error"] = error
                 self.state["preheat_last_phase"] = phase
                 self.state["preheat_phase"] = "idle"
+                self.state["failure_cooldown_until"] = time.time() + self.failure_cooldown_seconds
                 if source == "auto":
                     self.state.update({"auto_last_turn_at": time.time(),
                                        "auto_last_result": "failed",

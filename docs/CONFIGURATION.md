@@ -5,7 +5,7 @@
 | 网页配网 | `python3 scripts/build_xiaomiao.py` | `dist/XiaoMiao-Portal-Launcher.bin` | 通用安装、首次开机网页设置 |
 | 编译预配置 | `python3 scripts/build_xiaomiao.py --configured` | `dist-private/XiaoMiao-Preconfigured-PRIVATE.bin` | 个人预填 Wi-Fi 和服务器，安装后自动连接 |
 
-两者使用同一套显示、按键和 Launcher 安装流程。预配置方式也保留网页设置入口。
+两者使用同一套显示、按键和 Launcher 安装流程。预配置方式也保留网页设置入口；出于安全原因，网页配置只允许从设备自己的 `192.168.4.x` 设置热点访问，接入家庭 LAN 后的同一页面会返回 403。
 需要 PlatformIO；脚本会尝试 PATH 和 `~/.platformio/penv/bin/platformio`。
 
 ## 方便的交互配置

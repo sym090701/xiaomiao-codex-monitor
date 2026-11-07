@@ -390,6 +390,22 @@ String usageUrl() {
   return String("http://") + config.usageHost + ":" + String(config.usagePort) + "/usage";
 }
 
+// Configuration is intentionally available only from the device setup AP.
+// The STA/LAN interface never exposes stored Wi-Fi credentials or a writable
+// upstream host to arbitrary LAN peers.
+bool isSetupApClient() {
+  WiFiClient client = webServer.client();
+  IPAddress remote = client.remoteIP();
+  IPAddress ap = WiFi.softAPIP();
+  return remote[0] == ap[0] && remote[1] == ap[1] && remote[2] == ap[2];
+}
+
+bool requireSetupAp() {
+  if (isSetupApClient()) return true;
+  webServer.send(403, "text/plain; charset=utf-8", "Setup portal is AP-only");
+  return false;
+}
+
 String performanceUrl() {
   return String("http://") + config.usageHost + ":" + String(config.usagePort) + "/performance";
 }
@@ -413,6 +429,7 @@ void handleRoot() {
 }
 
 void handleConfigApi() {
+  if (!requireSetupAp()) return;
   StaticJsonDocument<1536> doc;
   doc["ssid"] = config.wifiSsid;
   doc["pass"] = config.wifiPass;
@@ -455,6 +472,7 @@ void handleConfigApi() {
 }
 
 void handleSave() {
+  if (!requireSetupAp()) return;
   config.wifiSsid = webServer.arg("ssid");
   config.wifiPass = webServer.arg("pass");
   config.usageHost = webServer.arg("host");

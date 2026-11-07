@@ -78,6 +78,16 @@ class TransportTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AutoPreheatTest(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_preheat_enters_circuit_breaker(self):
+        collector = Collector("unused", 60)
+        collector.payload = {"ok": True, "five_hour": {"reset_at_epoch": 900}}
+        with tempfile.TemporaryDirectory() as directory:
+            collector.preheater.state_file = Path(directory) / "state.json"
+            collector.preheater.state["failure_cooldown_until"] = 2000
+            with patch("quota_server.time.time", return_value=920):
+                result = await collector.preheater.run(collector)
+            self.assertEqual(result["status"], "failure_cooldown")
+
     async def test_auto_triggers_at_prediction_without_current_consumption(self):
         collector = Collector("unused", 60)
         collector.payload = {"ok": True, "five_hour": {"reset_at_epoch": 900}}

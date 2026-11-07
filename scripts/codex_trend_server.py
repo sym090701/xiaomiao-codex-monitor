@@ -4,6 +4,7 @@ import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import threading
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -73,6 +74,28 @@ def summarize(points):
 
 
 def make_handler(root):
+    request_slots = threading.BoundedSemaphore(4)
+    cache_lock = threading.Lock()
+    cached = {"at": 0.0, "key": None, "payload": None}
+
+    def trend_payload(hours, limit):
+        key = (hours, limit)
+        now = time.time()
+        with cache_lock:
+            if cached["key"] == key and now - cached["at"] < 15 and cached["payload"] is not None:
+                return cached["payload"]
+        if not request_slots.acquire(blocking=False):
+            return None
+        try:
+            points = load_points(root, hours, limit)
+            payload = {"schema_version": 1, "timezone": "Asia/Shanghai",
+                       "window_hours": hours, "points": points, **summarize(points)}
+            with cache_lock:
+                cached.update({"at": time.time(), "key": key, "payload": payload})
+            return payload
+        finally:
+            request_slots.release()
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urlparse(self.path)
@@ -86,9 +109,10 @@ def make_handler(root):
                 except (TypeError, ValueError):
                     self.send_error(400, "invalid hours or points")
                     return
-                points = load_points(root, hours, limit)
-                payload = {"schema_version": 1, "timezone": "Asia/Shanghai",
-                           "window_hours": hours, "points": points, **summarize(points)}
+                payload = trend_payload(hours, limit)
+                if payload is None:
+                    self.send_error(429, "trend service busy")
+                    return
             else:
                 self.send_error(404)
                 return
@@ -112,4 +136,7 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="192.168.1.158")
     parser.add_argument("--port", type=int, default=8788)
     args = parser.parse_args()
-    ThreadingHTTPServer((args.host, args.port), make_handler(args.root)).serve_forever()
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(args.root))
+    server.daemon_threads = True
+    server.request_queue_size = 16
+    server.serve_forever()
