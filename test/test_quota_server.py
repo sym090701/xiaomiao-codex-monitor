@@ -78,6 +78,53 @@ class TransportTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AutoPreheatTest(unittest.IsolatedAsyncioTestCase):
+    async def test_retry_after_original_trigger_window_and_only_once(self):
+        collector = Collector("unused", 60)
+        collector.payload = {"ok": True, "five_hour": {"used_percent": 0, "reset_at_epoch": 900}}
+        collector.updated = 2720
+        with tempfile.TemporaryDirectory() as directory:
+            p = collector.preheater
+            p.state_file = Path(directory) / "state.json"
+            p.auto_mode = "armed"
+            p._prediction_cache = {"predicted_at_epoch": 13520}
+            p._prediction_checked = 10**15
+            p.state.update(auto_attempted_prediction=13520, auto_retry_count=0,
+                           auto_last_result="failed", auto_retry_eligible=True,
+                           auto_retry_after=2720, failure_cooldown_until=2720)
+            with patch("quota_server.time.time", return_value=2720), \
+                    patch.object(p, "run", return_value={"ok": True}) as run:
+                await p.maybe_auto(collector)
+                await p.maybe_auto(collector)
+                run.assert_awaited_once()
+            self.assertTrue(list((Path(directory) / "preheat-decisions").glob("*.ndjson")))
+
+    async def test_uncertain_failure_never_retries(self):
+        collector = Collector("unused", 60)
+        collector.payload = {"ok": True, "five_hour": {"used_percent": 0}}
+        collector.updated = 2720
+        with tempfile.TemporaryDirectory() as directory:
+            p = collector.preheater
+            p.state_file = Path(directory) / "state.json"
+            p.auto_mode = "armed"
+            p._prediction_cache = {"predicted_at_epoch": 13520}
+            p._prediction_checked = 10**15
+            p.state.update(auto_attempted_prediction=13520, auto_retry_count=0,
+                           auto_last_result="failed", auto_retry_eligible=False,
+                           auto_retry_after=2720)
+            with patch("quota_server.time.time", return_value=2720), patch.object(p, "run") as run:
+                await p.maybe_auto(collector)
+                run.assert_not_called()
+            self.assertEqual(p.state["auto_reason"], "uncertain_no_retry")
+
+    def test_window_assessment_never_claims_activation(self):
+        p = Collector("unused", 60).preheater
+        a = {"five_hour": {"reset_at_epoch": 1000, "remaining_percent": 100}}
+        b = {"five_hour": {"reset_at_epoch": 1100, "remaining_percent": 99}}
+        self.assertEqual(p._window_assessment(a, b)["result"], "reset_unchanged")
+        b["five_hour"]["reset_at_epoch"] = 2000
+        self.assertEqual(p._window_assessment(a, b)["result"], "reset_changed_unconfirmed")
+        self.assertEqual(p._window_assessment(a, None)["result"], "unknown")
+
     async def test_failed_preheat_enters_circuit_breaker(self):
         collector = Collector("unused", 60)
         collector.payload = {"ok": True, "five_hour": {"reset_at_epoch": 900}}

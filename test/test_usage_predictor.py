@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from zoneinfo import ZoneInfo
 
-from usage_predictor import predict_usage
+from usage_predictor import extract_sessions, predict_usage
 
 
 class UsagePredictorTest(unittest.TestCase):
@@ -14,7 +14,7 @@ class UsagePredictorTest(unittest.TestCase):
     def epoch(self, value):
         return dt.datetime.fromisoformat(value).replace(tzinfo=self.zone).timestamp()
 
-    def write_day(self, root, day, hour=9, preheat=False):
+    def write_day(self, root, day, hour=20, preheat=False):
         epoch = self.epoch(day + "T%02d:00:00" % hour)
         rows = [dict(observed_at_epoch=epoch - 60, record_type="codex_usage",
                      usage={"five_hour": {"remaining_percent": 100}}),
@@ -24,7 +24,7 @@ class UsagePredictorTest(unittest.TestCase):
                      usage={"five_hour": {"remaining_percent": 98 if preheat else 99}})]
         Path(root, day + ".ndjson").write_text("\n".join(json.dumps(row) for row in rows))
 
-    def write_complete_day(self, root, day, hour=9, duration_minutes=90):
+    def write_complete_day(self, root, day, hour=20, duration_minutes=90):
         start = self.epoch(day + "T%02d:00:00" % hour)
         rows = []
         for minute in range(duration_minutes + 1):
@@ -39,17 +39,40 @@ class UsagePredictorTest(unittest.TestCase):
             for day in ["2026-10-28", "2026-10-29", "2026-10-30"]:
                 self.write_day(root, day)
             result = predict_usage(root, self.epoch("2026-11-03T05:30:00"))
-            self.assertEqual(result["predicted_at_epoch"], self.epoch("2026-11-03T09:00:00"))
+            self.assertEqual(result["predicted_at_epoch"], self.epoch("2026-11-03T20:00:00"))
             self.assertEqual(result["support_days"], 3)
             self.assertEqual(result["basis"], "workday")
 
-    def test_cross_midnight_lead_uses_tomorrow(self):
+    def test_tomorrow_is_predicted_after_today_passes(self):
         with tempfile.TemporaryDirectory() as root:
             for day in ["2026-10-28", "2026-10-29", "2026-10-30"]:
-                self.write_day(root, day, hour=1)
+                self.write_day(root, day, hour=20)
             result = predict_usage(root, self.epoch("2026-11-03T21:30:00"))
-            self.assertEqual(result["predicted_at_epoch"] - 12600,
-                             self.epoch("2026-11-03T21:30:00"))
+            self.assertEqual(result["predicted_at_epoch"], self.epoch("2026-11-04T20:00:00"))
+
+    def test_daytime_only_does_not_trigger(self):
+        with tempfile.TemporaryDirectory() as root:
+            for day in ["2026-10-28", "2026-10-29", "2026-10-30"]:
+                self.write_day(root, day, hour=10)
+            self.assertIsNone(predict_usage(root, self.epoch("2026-11-03T05:30:00"))["predicted_at_epoch"])
+
+    def test_daytime_bursts_do_not_hide_evening_sessions(self):
+        with tempfile.TemporaryDirectory() as root:
+            for day in ["2026-10-28", "2026-10-29", "2026-10-30"]:
+                self.write_day(root, day, hour=10)
+                path = Path(root, day + ".ndjson")
+                morning = path.read_text()
+                self.write_day(root, day, hour=20)
+                path.write_text(morning + "\n" + path.read_text())
+            result = predict_usage(root, self.epoch("2026-11-03T05:30:00"))
+            self.assertEqual(result["predicted_at_epoch"], self.epoch("2026-11-03T20:00:00"))
+            self.assertEqual(result["daytime_sessions"], 3)
+
+    def test_reset_boundary_is_not_counted_as_consumption(self):
+        rows = [(0, 100, "codex_usage", 1000), (60, 98, "codex_usage", 1000),
+                (120, 97, "codex_usage", 1900), (180, 95, "codex_usage", 1900)]
+        sessions = extract_sessions(rows)
+        self.assertEqual([s["drop"] for s in sessions], [2, 2])
 
     def test_preheat_and_following_sample_do_not_teach_usage(self):
         with tempfile.TemporaryDirectory() as root:
