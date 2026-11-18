@@ -24,6 +24,12 @@ python3 scripts/build_xiaomiao.py --configure
 `server_host`、`server_port`。服务器填 IPv4 地址或主机名，不带 `http://` 或路径。
 `device.local.json`、生成头文件、私有固件均被 Git 忽略。
 
+### 家外中继配置（准备中）
+
+配置生成器支持在私有 `device.local.json` 中增加 `home_relay` 对象：`host`、`port`、`ca_pem`、`read_token`、`device_id`、`device_secret` 和 `home_ssids`。读取令牌与命令密钥必须不同，设备 ID 使用 1–64 位字母、数字、下划线或短横线。CA 需为 PEM 格式；只有确定实际 HTTPS 证书链后才能配置。
+
+**这只是编译配置校验，不代表家外联网、远程预热或 TLS 客户端已实现。** 不要将配置、生成头文件或包含凭据的固件公开；编译进固件的凭据可以通过固件读取，应为设备设置独立可撤销的凭据。SSID 仅用于选择网络路径，不是认证依据。
+
 固件首先尝试第一个 Wi-Fi；连接失败时每 15 秒轮换下一个。
 这属于 Wi-Fi 连接回退，不会因服务器不通自动切换网络。子路由器需允许访问服务器所在网段。
 
