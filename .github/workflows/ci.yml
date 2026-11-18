@@ -20,3 +20,5 @@ jobs:
         run: |
           cp device.example.json device.local.json
           pio run -e xiaomiao_preconfigured
+      - name: Compile home relay variant with public test values
+        run: XM_DEVICE_CONFIG_FILE="$PWD/test/relay-build.fixture.json" pio run -e xiaomiao_standalone_preconfigured

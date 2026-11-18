@@ -54,7 +54,9 @@ def build_header(config):
         ssids = relay["home_ssids"]
         if not isinstance(ssids, list) or not 1 <= len(ssids) <= 5 or any(not isinstance(s, str) or not 1 <= len(s.encode()) <= 32 or "\0" in s for s in ssids):
             raise ValueError("home_ssids must contain 1–5 valid Wi-Fi names")
-    canonical = json.dumps(config, sort_keys=True, ensure_ascii=True).encode()
+    # Relay key rotation must not overwrite a Wi-Fi selected through the portal.
+    network_config = {key: value for key, value in config.items() if key != "home_relay"}
+    canonical = json.dumps(network_config, sort_keys=True, ensure_ascii=True).encode()
     def literal(value):
         return '"' + ''.join('\\%03o' % b for b in value.encode()) + '"'
     lines = [

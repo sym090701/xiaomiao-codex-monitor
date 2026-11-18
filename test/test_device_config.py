@@ -1,4 +1,5 @@
 import unittest
+import re
 from scripts.device_config import build_header
 
 
@@ -34,11 +35,13 @@ class BuildConfigTest(unittest.TestCase):
 
     def test_optional_private_relay_configuration(self):
         config = self.config()
+        previous_rev = re.search(r'XM_BOOT_REV\[\] = "(.*?)"', build_header(config)).group(1)
         config["home_relay"] = {"host": "relay.example.com", "port": 443,
                                 "ca_pem": "-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----",
                                 "read_token": "r" * 32, "device_id": "xm_1",
                                 "device_secret": "s" * 32, "home_ssids": ["home"]}
         self.assertIn("XM_HOME_RELAY_CONFIGURED", build_header(config))
+        self.assertEqual(previous_rev, re.search(r'XM_BOOT_REV\[\] = "(.*?)"', build_header(config)).group(1))
         config["home_relay"]["host"] = "http://relay.example.com"
         with self.assertRaises(ValueError):
             build_header(config)

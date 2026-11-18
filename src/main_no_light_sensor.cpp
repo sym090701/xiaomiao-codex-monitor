@@ -12,6 +12,13 @@
 #include <Wire.h>
 #include <WiFi.h>
 #ifdef XM_PRECONFIGURED
+#include <WiFiClientSecure.h>
+#include <mbedtls/md.h>
+#include <mbedtls/sha256.h>
+#include <esp_system.h>
+#include <time.h>
+#endif
+#ifdef XM_PRECONFIGURED
 #include "xiaomiao_boot_config.h"
 #endif
 #ifdef XIAOMIAO
@@ -196,6 +203,19 @@ bool mdnsStarted = false;
 bool wsStarted = false;
 volatile bool hostScreenOn = true;
 bool wsConnected = false;
+#ifdef XM_HOME_RELAY_CONFIGURED
+bool relayMode = false;
+bool relayModeInitialized = false;
+bool relayMacOnline = false;
+String relayFreshness = "offline";
+String relayCommandId;
+String relayCommandStatus;
+uint32_t relayLastFetchMs = 0, relayLastSuccessMs = 0, relayLastCommandMs = 0;
+void updateRelayMode();
+void fetchRelayState();
+void pollRelayCommand();
+void submitRelayPreheat();
+#endif
 #ifdef XM_STANDALONE_OTA
 #include "xiaomiao_ota.h"
 bool showOtaInfo = false;
@@ -562,6 +582,17 @@ void connectWifiIfNeeded() {
     WiFi.begin(network.ssid, network.password);
     return;
   }
+#ifdef XM_HOME_RELAY_CONFIGURED
+  // A portal-selected away network must not prevent returning to compiled
+  // home networks after moving back home. Rotate through both on failure.
+  static unsigned nextCombined = 0;
+  unsigned choice = nextCombined++ % (XM_NETWORK_COUNT + 1);
+  if (choice < XM_NETWORK_COUNT) {
+    const XmNetwork &network = XM_NETWORKS[choice];
+    WiFi.begin(network.ssid, network.password);
+    return;
+  }
+#endif
 #endif
   WiFi.begin(config.wifiSsid.c_str(), config.wifiPass.c_str());
 }
@@ -660,6 +691,151 @@ void applyUsagePayload(JsonVariantConst doc) {
   usagePageDirty = true;
 }
 
+#ifdef XM_HOME_RELAY_CONFIGURED
+// The SSID selects a transport only; TLS and scoped credentials provide authentication.
+void updateRelayMode() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  bool home = false;
+  for (unsigned i = 0; i < XM_HOME_SSID_COUNT; ++i)
+    if (WiFi.SSID() == XM_HOME_SSIDS[i]) home = true;
+  bool next = !home;
+  if (relayModeInitialized && next == relayMode) return;
+  relayModeInitialized = true;
+  relayMode = next;
+  if (wsStarted) webSocket.disconnect();
+  wsStarted = false; wsConnected = false; lastWsMessageMs = 0;
+  usage.ok = false; performance.ok = false; trendCount = 0;
+  relayLastFetchMs = 0; relayLastSuccessMs = 0; relayFreshness = "offline";
+  configTime(0, 0, "pool.ntp.org", "time.cloudflare.com");
+  Preferences p;
+  if (p.begin("relaycmd", true)) { relayCommandId = p.getString("id", ""); p.end(); }
+  relayCommandStatus = relayCommandId.length() ? "CHECKING" : "";
+  relayLastCommandMs = 0;
+  usagePageDirty = true;
+}
+
+String relayUrl(const String &path) {
+  return String("https://") + XM_RELAY_HOST + ":" + String(XM_RELAY_PORT) + path;
+}
+
+bool relayHttpGet(const String &path, String &body, int &status) {
+  WiFiClientSecure client;
+  client.setCACert(XM_RELAY_CA_PEM);
+  HTTPClient http;
+  if (!http.begin(client, relayUrl(path))) return false;
+  http.setTimeout(5000);
+  http.addHeader("Authorization", String("Bearer ") + XM_RELAY_READ_TOKEN);
+  status = http.GET();
+  // Do not follow redirects or accept an unbounded response.
+  int length = http.getSize();
+  bool ok = status == HTTP_CODE_OK && length >= 0 && length <= 8192;
+  if (ok) body = http.getString();
+  http.end();
+  return ok && body.length() <= 8192;
+}
+
+void fetchRelayState() {
+  if (relayLastSuccessMs && millis() - relayLastSuccessMs > 120000UL) {
+    usage.ok = false; relayFreshness = "offline"; usagePageDirty = true;
+  }
+  if (WiFi.status() != WL_CONNECTED || (relayLastFetchMs && millis() - relayLastFetchMs < 30000UL)) return;
+  relayLastFetchMs = millis();
+  String body; int status = 0;
+  if (!relayHttpGet("/v1/home/state", body, status)) { usage.ok = false; relayFreshness = "offline"; usagePageDirty = true; return; }
+  DynamicJsonDocument doc(12288);
+  if (deserializeJson(doc, body)) { usage.ok = false; relayFreshness = "offline"; return; }
+  relayFreshness = doc["freshness"] | "offline";
+  JsonVariant data = doc["data"];
+  JsonVariant quota = data["quota"];
+  time_t now = time(nullptr);
+  long updated = quota["server_updated_epoch"] | 0L;
+  if (relayFreshness != "fresh" || !quota["ok"].as<bool>() || quota["stale"].as<bool>() ||
+      now < 1700000000 || updated <= 0 || now < updated - 60 || now - updated > 180) {
+    usage.ok = false; relayMacOnline = false; usagePageDirty = true; return;
+  }
+  for (const char *name : {"five_hour", "weekly"}) {
+    JsonVariant window = quota[name];
+    if (!window.isNull() && window["reset_at_epoch"].is<long>())
+      window["reset_after_seconds"] = max(0L, window["reset_at_epoch"].as<long>() - long(now));
+  }
+  applyUsagePayload(quota);
+  relayMacOnline = data["mac"]["online"] | false;
+  relayLastSuccessMs = millis();
+  preheatLastResult = data["preheat"]["last_result"] | "unknown";
+  usagePageDirty = true;
+}
+
+String relayHex(const uint8_t *bytes, size_t len) {
+  static const char hex[] = "0123456789abcdef";
+  String result; result.reserve(len * 2);
+  for (size_t i = 0; i < len; ++i) { result += hex[bytes[i] >> 4]; result += hex[bytes[i] & 15]; }
+  return result;
+}
+
+String relayRandomHex(size_t bytes) {
+  String out;
+  for (size_t i = 0; i < bytes; ++i) { uint8_t b = esp_random() & 0xff; out += relayHex(&b, 1); }
+  return out;
+}
+
+void pollRelayCommand() {
+  if (!relayCommandId.length() || WiFi.status() != WL_CONNECTED ||
+      (relayLastCommandMs && millis() - relayLastCommandMs < 10000UL)) return;
+  relayLastCommandMs = millis();
+  String body; int status = 0;
+  if (!relayHttpGet(String("/v1/home/commands/") + relayCommandId, body, status)) {
+    relayCommandStatus = status == 404 ? "UNKNOWN" : "CHECKING"; return;
+  }
+  DynamicJsonDocument doc(2048);
+  if (deserializeJson(doc, body)) return;
+  String state = doc["status"] | "unknown";
+  String reason = doc["reason"] | "";
+  relayCommandStatus = state; relayCommandStatus.toUpperCase();
+  if (state == "completed" || state == "failed" || state == "expired" ||
+      (state == "unknown" && reason.startsWith("operator_resolved:"))) {
+    Preferences p;
+    if (p.begin("relaycmd", false)) { p.remove("id"); p.end(); relayCommandId = ""; }
+  }
+  usagePageDirty = true;
+}
+
+void submitRelayPreheat() {
+  if (relayCommandId.length()) { relayCommandStatus = "CHECKING"; relayLastCommandMs = 0; return; }
+  time_t now = time(nullptr);
+  if (WiFi.status() != WL_CONNECTED || now < 1700000000) { relayCommandStatus = "NO TIME/WIFI"; return; }
+  uint8_t uuid[16];
+  for (auto &b : uuid) b = esp_random() & 0xff;
+  uuid[6] = (uuid[6] & 0x0f) | 0x40; uuid[8] = (uuid[8] & 0x3f) | 0x80;
+  String h = relayHex(uuid, sizeof(uuid));
+  String id = h.substring(0,8) + "-" + h.substring(8,12) + "-" + h.substring(12,16) + "-" + h.substring(16,20) + "-" + h.substring(20);
+  String body = String("{\"request_id\":\"") + id + "\",\"operation\":\"preheat\",\"expires_at\":" + String(long(now + 120)) + "}";
+  uint8_t digest[32], signature[32];
+  mbedtls_sha256_ret(reinterpret_cast<const unsigned char *>(body.c_str()), body.length(), digest, 0);
+  String ts = String(long(now)), nonce = relayRandomHex(16);
+  String canonical = String("POST\n/v1/home/commands\n") + ts + "\n" + nonce + "\n" + relayHex(digest, 32);
+  const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  if (!md || mbedtls_md_hmac(md, reinterpret_cast<const unsigned char *>(XM_RELAY_DEVICE_SECRET), strlen(XM_RELAY_DEVICE_SECRET),
+                            reinterpret_cast<const unsigned char *>(canonical.c_str()), canonical.length(), signature) != 0) {
+    relayCommandStatus = "SIGN ERROR"; return;
+  }
+  Preferences p;
+  if (!p.begin("relaycmd", false)) { relayCommandStatus = "STORE ERROR"; return; }
+  size_t written = p.putString("id", id); p.end();
+  if (written != id.length()) { relayCommandStatus = "STORE ERROR"; return; }
+  relayCommandId = id; relayCommandStatus = "SENDING"; relayLastCommandMs = 0;
+  WiFiClientSecure client; client.setCACert(XM_RELAY_CA_PEM);
+  HTTPClient http;
+  if (!http.begin(client, relayUrl("/v1/home/commands"))) { relayCommandStatus = "UNKNOWN"; return; }
+  http.setTimeout(5000);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Device-Id", XM_RELAY_DEVICE_ID);
+  http.addHeader("X-Timestamp", ts); http.addHeader("X-Nonce", nonce);
+  http.addHeader("X-Signature", relayHex(signature, 32));
+  int result = http.POST(body); http.end();
+  relayCommandStatus = (result == 200 || result == 202) ? "PENDING" : "UNKNOWN";
+}
+#endif
+
 #ifdef XIAOMIAO
 void setHardwareLed(bool on) {
   Wire.beginTransmission(0x40);
@@ -697,6 +873,11 @@ void preheatHttpTask(void *argument) {
 
 void requestPreheat() {
   if (preheatInProgress) return;
+#ifdef XM_HOME_RELAY_CONFIGURED
+  updateRelayMode();
+  if (relayMode) { submitRelayPreheat(); return; }
+  if (relayCommandId.length()) { preheatMessage = "REMOTE PENDING"; preheatMessageUntilMs = millis() + 4000; return; }
+#endif
   if (WiFi.status() != WL_CONNECTED) {
     preheatMessage = "PREHEAT WIFI";
     preheatMessageUntilMs = millis() + 3000;
@@ -722,6 +903,9 @@ void requestPreheat() {
 }
 
 void fetchPreheatStatusIfNeeded() {
+#ifdef XM_HOME_RELAY_CONFIGURED
+  if (relayMode) return;
+#endif
   if (config.displayMode != 3 || WiFi.status() != WL_CONNECTED ||
       (lastPreheatStatusFetchMs && millis() - lastPreheatStatusFetchMs < 30000UL)) {
     return;
@@ -924,6 +1108,9 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 }
 
 void updateWsFailSafe() {
+#ifdef XM_HOME_RELAY_CONFIGURED
+  if (relayMode) { hostScreenOn = true; return; }
+#endif
   if (config.followHostScreen &&
       ((!wsConnected && millis() > WS_STALE_MS) ||
        (lastWsMessageMs != 0 && millis() - lastWsMessageMs > WS_STALE_MS))) {
@@ -1200,6 +1387,9 @@ void drawUsagePage(GFXcanvas16 &spr) {
 
 #ifdef XIAOMIAO
 void fetchNasTrendIfNeeded() {
+#ifdef XM_HOME_RELAY_CONFIGURED
+  if (relayMode) return;
+#endif
   if (config.displayMode != 2 || WiFi.status() != WL_CONNECTED ||
       (lastTrendFetchMs && millis() - lastTrendFetchMs < TREND_FETCH_MS)) {
     return;
@@ -1322,6 +1512,9 @@ String trendEtaText() {
 }
 
 void drawTrendPage(GFXcanvas16 &spr) {
+#ifdef XM_HOME_RELAY_CONFIGURED
+  if (relayMode) { drawStatusPage(spr, "TREND", "REMOTE N/A", "HOME WIFI ONLY"); return; }
+#endif
   spr.fillScreen(rgb565(8, 10, 16));
   uint16_t cyan = rgb565(55, 209, 176);
   uint16_t green = rgb565(104, 220, 90);
@@ -1341,6 +1534,13 @@ void drawTrendPage(GFXcanvas16 &spr) {
 }
 
 void drawPreheatPage(GFXcanvas16 &spr) {
+#ifdef XM_HOME_RELAY_CONFIGURED
+  if (relayMode) {
+    drawStatusPage(spr, "REMOTE PREHEAT", relayCommandStatus.length() ? relayCommandStatus : "HOLD B",
+                   relayCommandId.length() ? "REQUEST SAVED" : "NO REQUEST");
+    return;
+  }
+#endif
   spr.fillScreen(rgb565(8, 10, 16));
   uint16_t cyan = rgb565(55, 209, 176);
   uint16_t green = rgb565(104, 220, 90);
@@ -1411,6 +1611,9 @@ void drawMetric(GFXcanvas16 &spr, int16_t x, int16_t y, const String &label, flo
 }
 
 void drawPerformancePage(GFXcanvas16 &spr) {
+#ifdef XM_HOME_RELAY_CONFIGURED
+  if (relayMode) { drawStatusPage(spr, "MAC STATUS", relayFreshness == "fresh" ? (relayMacOnline ? "ONLINE" : "OFFLINE") : "DATA OLD", "DETAILS N/A"); return; }
+#endif
   spr.fillScreen(color565(config.performanceBackground));
 
   if (!config.wifiSsid.length()) {
@@ -1638,10 +1841,21 @@ void loop() {
 #endif
   connectWifiIfNeeded();
   setupMdnsIfNeeded();
+#ifdef XM_HOME_RELAY_CONFIGURED
+  updateRelayMode();
+  if (!relayMode) {
+#endif
   setupWebSocketIfNeeded();
   if (wsStarted) {
     webSocket.loop();
   }
+#ifdef XM_HOME_RELAY_CONFIGURED
+    pollRelayCommand();
+  } else {
+    fetchRelayState();
+    pollRelayCommand();
+  }
+#endif
 #ifdef XIAOMIAO
   fetchNasTrendIfNeeded();
   fetchPreheatStatusIfNeeded();
