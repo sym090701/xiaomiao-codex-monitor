@@ -1916,12 +1916,13 @@ void loop() {
 #ifdef XM_STANDALONE_OTA
   if (showOtaInfo) {
     frameB.fillScreen(ST77XX_BLACK);
-    drawText(frameB, 4, 8, "OTA UPDATE", ST77XX_CYAN, 2);
-    drawText(frameB, 4, 35, "http://" + WiFi.localIP().toString(), ST77XX_WHITE);
-    drawText(frameB, 4, 49, "/ota   User: admin", ST77XX_WHITE);
-    drawText(frameB, 4, 69, "Password:", ST77XX_CYAN);
-    drawText(frameB, 4, 84, XM_OTA_PASSWORD, ST77XX_WHITE);
-    drawText(frameB, 4, 103, "A: Back", ST77XX_WHITE);
+    drawText(frameB, 4, 4, "OTA / WIFI SETUP", ST77XX_CYAN);
+    drawText(frameB, 4, 19, WiFi.localIP().toString() + "/ota", ST77XX_WHITE);
+    drawText(frameB, 4, 33, "OTA:" + String(XM_OTA_PASSWORD), ST77XX_WHITE);
+    drawText(frameB, 4, 53, apName, ST77XX_CYAN);
+    drawText(frameB, 4, 67, apPassword, ST77XX_WHITE);
+    drawText(frameB, 4, 84, "192.168.4.1", ST77XX_WHITE);
+    drawText(frameB, 4, 105, "A: Back", ST77XX_WHITE);
   }
 #endif
   if (preheatMessageUntilMs && millis() < preheatMessageUntilMs) {
