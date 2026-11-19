@@ -22,3 +22,5 @@ jobs:
           pio run -e xiaomiao_preconfigured
       - name: Compile home relay variant with public test values
         run: XM_DEVICE_CONFIG_FILE="$PWD/test/relay-build.fixture.json" pio run -e xiaomiao_standalone_preconfigured
+      - name: Compile experimental ESP8266 quota firmware with display disabled
+        run: pio run -e esp8266_epaper_quota
