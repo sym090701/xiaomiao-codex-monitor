@@ -1,6 +1,8 @@
 // Experimental 296x152 tri-color panel profile. Not hardware-validated.
 // The manufacturer example and supplied panel specification disagree about BUSY.
 // Do not upload until the panel/controller and electrical compatibility are confirmed.
+// Display sequence/plane conventions adapted from sym090701's MIT-licensed
+// esp8266-e2266fs092-photo-frame; see docs/licenses/esp8266-photo-frame-MIT.txt.
 #include <Arduino.h>
 #include <Adafruit_GFX.h>
 #include <ArduinoJson.h>
@@ -15,7 +17,7 @@ constexpr uint16_t PANEL_WIDTH = 152, PANEL_HEIGHT = 296;
 constexpr size_t PLANE_BYTES = PANEL_WIDTH * PANEL_HEIGHT / 8;
 constexpr unsigned long POLL_MS = 5UL * 60UL * 1000UL;
 constexpr unsigned long REPAINT_MS = 24UL * 60UL * 60UL * 1000UL;
-constexpr unsigned long BUSY_TIMEOUT_MS = 45000UL;
+constexpr unsigned long BUSY_TIMEOUT_MS = 60000UL;
 #ifndef EPD_BUSY_LEVEL
 // Matches the supplied ESP8266 demo, NOT the conflicting panel PDF.
 #define EPD_BUSY_LEVEL LOW
@@ -62,6 +64,7 @@ bool panelStart() {
   command(0x41); data(0x07);
   command(0x61); data(0x98); data(0x01); data(0x28);
   command(0x50); data(0x97);
+  command(0x2a); data(0x00); data(0x00); data(0x00); data(0xff); data(0x00);
   return true;
 }
 
@@ -70,6 +73,7 @@ bool panelDisplay() {
   Serial.println(F("[EPD] disabled: confirm controller and BUSY polarity before enabling"));
   return false;
 #else
+  Serial.println(F("[EPD] refresh started"));
   SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
   if (!panelStart()) { SPI.endTransaction(); return false; }
   command(0x10);
@@ -79,7 +83,7 @@ bool panelDisplay() {
   }
   command(0x13);
   for (size_t i = 0; i < PLANE_BYTES; ++i) {
-    data(0xff); // No red pixels in this first version.
+    data(0x00); // DTM2: zero means no red, per the tested photo-frame driver.
     if ((i & 255) == 0) yield();
   }
   command(0x12); delay(20);
@@ -88,6 +92,7 @@ bool panelDisplay() {
   if (!waitReady()) { SPI.endTransaction(); return false; }
   delay(1000); command(0x07); data(0xa5);
   SPI.endTransaction();
+  Serial.println(F("[EPD] refresh complete, panel asleep"));
   return true;
 #endif
 }
@@ -128,6 +133,7 @@ Quota readQuota() {
   if (!http.begin(client, XM_BOOT_HOST, XM_BOOT_PORT, "/usage")) return out;
   http.setTimeout(5000);
   int status = http.GET();
+  Serial.printf("[Quota] HTTP %d\n", status);
   int length = http.getSize();
   if (status == HTTP_CODE_OK && length >= 0 && length <= 8192) {
     DynamicJsonDocument doc(8192);
@@ -145,9 +151,12 @@ void ensureWifi() {
   if (WiFi.status() == WL_CONNECTED) return;
   static unsigned network = 0;
   const XmNetwork &next = XM_NETWORKS[network++ % XM_NETWORK_COUNT];
+  Serial.println(F("[WiFi] connecting"));
   WiFi.begin(next.ssid, next.password);
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 12000) delay(100);
+  if (WiFi.status() == WL_CONNECTED) Serial.println(F("[WiFi] connected"));
+  else Serial.println(F("[WiFi] not connected"));
 }
 }  // namespace
 
