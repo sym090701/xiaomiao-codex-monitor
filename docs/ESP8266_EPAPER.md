@@ -8,6 +8,8 @@
 
 实物照片上的屏幕标签为 `SE2266FS092`，而规格书是 `E2266FS092`，不能假定它们是同一修订。板上可见的引脚标识与预设一致；屏幕排线在照片中未连接，FPC 座的接触面方向及管脚定义仍需核验。社区项目有该型号的使用记录，但仅作为参考，不替代实物电气验证。
 
+用于排查残影时可单独编译 `EPD_SERIAL_CLEAN_TEST=1` 的临时测试固件；它不会在启动时自动刷新，必须从串口明确发送 `CLEAN3` 才执行三轮黑白全刷，每次都等待 BUSY 完成并在超时时停止，完成后恢复额度界面。它是针对用户要求的一次性测试，不代表厂家推荐快速交替刷屏，也不能保证去除残影。测试后应刷回普通额度固件；切勿持续刷屏或在刷新中断电。
+
 预设引脚对应微雪 E-Paper ESP8266 Driver Board 官方资料：BUSY=D1/GPIO5、RST=D4/GPIO2、DC=D2/GPIO4、CS=D8/GPIO15、SCK=D5/GPIO14、MOSI=D7/GPIO13。不同驱动板或排线转接板不能照搬；板子是否为这一型号仍需实物确认。ESP8266 的 GPIO2 和 GPIO15 同时是启动配置引脚，硬件需满足其上电电平。参考：[微雪驱动板](https://www.waveshare.com/wiki/E-Paper_ESP8266_Driver_Board)、[ESP8266 启动模式](https://arduino-esp8266.readthedocs.io/en/latest/boards.html)。
 
 默认编译使用公开的 `device.example.json` 测试值，不连接个人账户：

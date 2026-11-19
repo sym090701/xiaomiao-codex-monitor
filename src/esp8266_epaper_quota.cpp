@@ -169,6 +169,44 @@ void setup() {
 }
 
 void loop() {
+#if defined(EPD_SERIAL_CLEAN_TEST) && EPD_SERIAL_CLEAN_TEST
+  // A separate temporary build: never starts repeated refreshes by itself.
+  // After reset it waits for an explicit serial command again.
+  static bool cleaningComplete = false;
+  static String serialCommand;
+  if (!cleaningComplete) {
+    while (Serial.available()) {
+      char ch = char(Serial.read());
+      if (ch == '\n') {
+        serialCommand.trim();
+        if (serialCommand == "CLEAN3") {
+          if (!canvas.getBuffer()) {
+            Serial.println(F("[CLEAN] FAILED: framebuffer allocation"));
+            while (true) delay(1000);
+          }
+          Serial.println(F("[CLEAN] 3 black-white cycles requested"));
+          for (unsigned cycle = 1; cycle <= 3; ++cycle) {
+            for (unsigned white = 0; white < 2; ++white) {
+              canvas.setRotation(1);
+              canvas.fillScreen(white ? 1 : 0);
+              Serial.printf("[CLEAN] cycle=%u phase=%s\n", cycle, white ? "white" : "black");
+              if (!panelDisplay()) {
+                Serial.println(F("[CLEAN] FAILED; stopped"));
+                while (true) delay(1000);
+              }
+            }
+          }
+          cleaningComplete = true;
+          Serial.println(F("[CLEAN] DONE; restoring quota display"));
+        }
+        serialCommand = "";
+      } else if (serialCommand.length() < 16) {
+        serialCommand += ch;
+      }
+    }
+    if (!cleaningComplete) { delay(50); return; }
+  }
+#endif
   static bool first = true, lastPaintOk = false;
   static unsigned long lastPoll = 0, lastPaint = 0;
   static Quota previous;
