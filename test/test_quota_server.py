@@ -1,6 +1,6 @@
 import unittest
 import tempfile
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from quota_server import normalize, Collector, create_app
 from pathlib import Path
 from aiohttp.test_utils import TestClient, TestServer
@@ -78,6 +78,65 @@ class TransportTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AutoPreheatTest(unittest.IsolatedAsyncioTestCase):
+    async def test_completed_and_token_usage_match_accepted_turn(self):
+        from test_preheat_cost_probe import FakeProcess
+        fields = {"inputTokens": 100, "cachedInputTokens": 20, "outputTokens": 5,
+                  "reasoningOutputTokens": 0, "totalTokens": 105}
+        proc = FakeProcess([
+            {"id": 3, "result": {"turn": {"id": "correct"}}},
+            {"method": "turn/completed", "params": {"threadId": "t", "turn": {"id": "old", "status": "completed"}}},
+            {"method": "thread/tokenUsage/updated", "params": {"threadId": "t", "turnId": "correct", "tokenUsage": {"last": fields}}},
+            {"method": "turn/completed", "params": {"threadId": "t", "turn": {"id": "correct", "status": "completed"}}},
+        ])
+        collector = Collector("unused", 60)
+        collector.payload = {"ok": True, "five_hour": {"used_percent": 0, "reset_at_epoch": 900}}
+        with tempfile.TemporaryDirectory() as directory:
+            p = collector.preheater
+            p.state_file = Path(directory) / "state.json"
+            p.state = {"thread_id": "t"}
+            with patch("quota_server.time.time", return_value=920), \
+                 patch("quota_server.asyncio.create_subprocess_exec", AsyncMock(return_value=proc)), \
+                 patch("quota_server.read_limits", AsyncMock(return_value=collector.payload)), \
+                 patch.object(p, "_rpc", AsyncMock()):
+                result = await p.run(collector)
+            self.assertTrue(result["ok"])
+            self.assertEqual(p.state["last_token_usage"], fields)
+
+    def test_cost_controls_preserve_default_and_can_opt_in(self):
+        p = Collector("unused", 60).preheater
+        p.preheat_model = ""
+        p.preheat_effort = ""
+        p.preheat_standard_tier = False
+        default = p._turn_params("thread", "message")
+        self.assertNotIn("model", default)
+        self.assertNotIn("serviceTierForTurn", default)
+        p.preheat_model, p.preheat_effort, p.preheat_standard_tier = "gpt-6-luna", "low", True
+        params = p._turn_params("thread", "message")
+        self.assertEqual(params["model"], "gpt-6-luna")
+        self.assertEqual(params["effort"], "low")
+        self.assertEqual(params["serviceTierForTurn"], "default")
+
+    def test_usage_only_accepts_scoped_valid_events(self):
+        p = Collector("unused", 60).preheater
+        fields = {"inputTokens": 100, "cachedInputTokens": 20, "outputTokens": 5,
+                  "reasoningOutputTokens": 0, "totalTokens": 105}
+        event = {"method": "thread/tokenUsage/updated", "params": {"threadId": "thread",
+                 "turnId": "turn", "tokenUsage": {"last": fields, "total": {}}}}
+        self.assertEqual(p._token_usage(event, "thread"), ("turn", fields))
+        self.assertIsNone(p._token_usage(event, "other"))
+        event["params"]["tokenUsage"]["last"]["cachedInputTokens"] = 101
+        self.assertIsNone(p._token_usage(event, "thread"))
+
+    async def test_remote_active_window_fails_closed(self):
+        collector = Collector("unused", 60)
+        collector.payload = {"ok": True, "five_hour": {"used_percent": 10, "reset_at_epoch": 2000}}
+        collector.updated = 920
+        with tempfile.TemporaryDirectory() as directory:
+            collector.preheater.state_file = Path(directory) / "state.json"
+            with patch("quota_server.time.time", return_value=920):
+                result = await collector.preheater.run(collector, source="remote")
+            self.assertEqual(result["status"], "waiting_reset")
+
     async def test_retry_after_original_trigger_window_and_only_once(self):
         collector = Collector("unused", 60)
         collector.payload = {"ok": True, "five_hour": {"used_percent": 0, "reset_at_epoch": 900}}

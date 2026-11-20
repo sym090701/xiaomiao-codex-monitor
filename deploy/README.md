@@ -66,6 +66,10 @@ Environment=PREHEAT_AUTO_DAILY_LIMIT=1
 
 `armed` 表示允许真实请求，`off` 表示仅保留手动长按 B。状态接口 `/api/preheat/status` 保持原有鉴权，新增 `auto_lead_hours`、`auto_lead_basis`、`auto_duration_hours`、`auto_prediction_local`、`auto_due_local`、`preheat_phase`、`preheat_last_phase`、`auto_retry_count`；`auto_lead_basis=historical_duration` 表示动态倒推，`safe_default` 表示回退 3.5 小时。turn 等待默认 180 秒，可由 `PREHEAT_TURN_TIMEOUT_SECONDS` 覆盖。超时错误会记录为 `TimeoutError@thread_resume`、`TimeoutError@turn_wait` 等阶段标记；同一预测只允许一次 30 分钟后的延迟重试，避免无限重复请求。
 
+预热成本控制为可选项：`PREHEAT_MODEL` 可指定账号 `model/list` 中可用模型，`PREHEAT_REASONING_EFFORT` 可指定其支持的推理档位，`PREHEAT_STANDARD_TIER=1` 强制本次 turn 使用标准速度；不设置则保留原行为。Codex 的模型覆盖可能沿用到同一线程后续 turn，回退时应明确指定原模型，不要只删除变量。完成事件可记录当前 turn 最后一次模型请求的输入、缓存输入和输出 token；无通知时为 `null`，不是零。缓存输入已包含在总输入中，不能重复相加。日志记录的是 token，不代表账单 credits；多模型请求的 turn 不能将最后一次请求当作总量。
+
+`scripts/preheat_cost_probe.py` 是需要明确授权的单次试验工具：必须先停止额度服务、检查冷却、备份原会话及状态文件，随后压缩原线程并最多执行一次模型请求。它以持久标记阻止自动重试；不确定结果必须人工核查。压缩本身可能消耗额度或改变窗口；低成本模型的请求完成也不能证明它会激活与原模型相同的 5 小时额度。请勿在正常服务运行中执行，或直接清除标记反复尝试。
+
 决策变化和执行结果写入 `CODEXLOGS_LOCAL_DIR/preheat-decisions/YYYY-MM-DD.ndjson`，随归档同步 NAS；未配置归档时写到状态文件旁的同名目录。记录不包含提示词或凭据。`last_window_assessment` 对比请求前后重置时间：`reset_unchanged`、`reset_changed_unconfirmed` 或 `unknown`；变化本身不能证明成功激活新窗口，`completed` 只表示 turn 完成且随后查询成功。`decision_log_error` 非空表示记录写入失败。历史缺测、采样间断、百分比精度和日间零散使用均会影响预测；白天暂不自动预热，不会增加总额度。
 
 ## Codex 用量趋势归档

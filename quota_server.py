@@ -109,6 +109,10 @@ class Preheater:
             "PREHEAT_AUTO_MIN_EVENTS", "3")))
         self.turn_timeout_seconds = max(90, int(os.environ.get(
             "PREHEAT_TURN_TIMEOUT_SECONDS", "180")))
+        # Empty means the persisted thread's current model, preserving existing behavior.
+        self.preheat_model = os.environ.get("PREHEAT_MODEL", "").strip()
+        self.preheat_effort = os.environ.get("PREHEAT_REASONING_EFFORT", "").strip()
+        self.preheat_standard_tier = os.environ.get("PREHEAT_STANDARD_TIER", "0") == "1"
         self._prediction_cache = None
         self._prediction_checked = 0
         self._last_decision_key = None
@@ -134,7 +138,8 @@ class Preheater:
             last_turn_local = dt.datetime.fromtimestamp(
                 last_turn_at, dt.timezone.utc).astimezone(
                     ZoneInfo("Asia/Shanghai")).strftime("%m-%d %H:%M")
-        return {"thread_id_present": bool(self.state.get("thread_id")),
+        return {"remote_preheat_guard": 1,
+                "thread_id_present": bool(self.state.get("thread_id")),
                 "last_result": self.state.get("last_result"),
                 "last_error": self.state.get("last_error"),
                 "last_turn_at": self.state.get("last_turn_at"),
@@ -155,6 +160,8 @@ class Preheater:
                 "preheat_last_phase": self.state.get("preheat_last_phase", ""),
                 "auto_retry_eligible": self.state.get("auto_retry_eligible", False),
                 "last_window_assessment": self.state.get("last_window_assessment"),
+                "last_token_usage": self.state.get("last_token_usage"),
+                "preheat_model_configured": self.preheat_model or None,
                 "decision_log_error": self.state.get("decision_log_error", ""),
                 "auto_retry_count": self.state.get("auto_retry_count", 0),
                 "failure_cooldown_remaining_seconds": max(0, int(
@@ -212,6 +219,33 @@ class Preheater:
             self._last_decision_key = key
         self._save()
 
+    def _turn_params(self, thread_id, message_id):
+        params = {"threadId": thread_id, "input": [{"type": "text", "text":
+                  "你好。请只回复 OK，不要调用工具，不要修改文件。"}],
+                  "approvalPolicy": "never", "clientUserMessageId": message_id}
+        if self.preheat_model:
+            params["model"] = self.preheat_model
+        if self.preheat_effort:
+            params["effort"] = self.preheat_effort
+        if self.preheat_standard_tier:
+            params["serviceTierForTurn"] = "default"
+        return params
+
+    @staticmethod
+    def _token_usage(message, thread_id):
+        if message.get("method") != "thread/tokenUsage/updated":
+            return None
+        params = message.get("params") or {}
+        if params.get("threadId") != thread_id or not isinstance(params.get("turnId"), str):
+            return None
+        usage = (params.get("tokenUsage") or {}).get("last") or {}
+        fields = ("inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens")
+        if any(type(usage.get(k)) is not int or usage[k] < 0 for k in fields):
+            return None
+        if usage["cachedInputTokens"] > usage["inputTokens"]:
+            return None
+        return params["turnId"], {k: usage[k] for k in fields}
+
     async def _rpc(self, proc, request_id, method, params, phase=None):
         if phase:
             self.state["preheat_phase"] = phase
@@ -241,6 +275,16 @@ class Preheater:
             if now < failure_until:
                 return {"ok": False, "status": "failure_cooldown",
                         "retry_after_seconds": int(failure_until - now)}
+            if source == "remote":
+                # Check under the same lock as manual and automatic preheats.
+                usage = collector.snapshot()["usage"]
+                window = usage.get("five_hour") or {}
+                reset_at, used = window.get("reset_at_epoch"), window.get("used_percent")
+                if (not usage.get("ok") or usage.get("stale") or
+                        type(reset_at) not in (int, float) or type(used) not in (int, float)):
+                    return {"ok": False, "status": "quota_unavailable"}
+                if reset_at > now and used > 0:
+                    return {"ok": False, "status": "waiting_reset"}
             if source == "auto":
                 window = collector.payload.get("five_hour") or {}
                 reset_at = window.get("reset_at_epoch")
@@ -286,13 +330,14 @@ class Preheater:
                 self.state["preheat_phase"] = "turn_start"
                 self._save()
                 proc.stdin.write((json.dumps({"id": 3, "method": "turn/start",
-                    "params": {"threadId": thread_id, "input": [{
-                        "type": "text", "text": "你好。请只回复 OK，不要调用工具，不要修改文件。"}],
-                        "approvalPolicy": "never", "clientUserMessageId": turn_id}}) + "\n").encode())
+                    "params": self._turn_params(thread_id, turn_id)}) + "\n").encode())
                 await proc.stdin.drain()
                 completed = False
                 self.state["preheat_phase"] = "turn_wait"
                 self._save()
+                by_turn = {}
+                completions = {}
+                accepted_turn_id = None
                 async with asyncio.timeout(self.turn_timeout_seconds):
                     while True:
                         line = await proc.stdout.readline()
@@ -300,11 +345,25 @@ class Preheater:
                             raise RuntimeError("Codex preheat turn stopped")
                         message = json.loads(line)
                         params = message.get("params", {})
-                        if message.get("method") == "turn/completed":
-                            status = params.get("turn", {}).get("status")
+                        if message.get("id") == 3:
+                            if "error" in message:
+                                raise RuntimeError("Codex preheat turn start rejected")
+                            accepted_turn_id = (message.get("result", {}).get("turn") or {}).get("id")
+                            if not isinstance(accepted_turn_id, str) or not accepted_turn_id:
+                                raise RuntimeError("Codex preheat turn ID missing")
+                        parsed = self._token_usage(message, thread_id)
+                        if parsed:
+                            by_turn[parsed[0]] = parsed[1]
+                        if message.get("method") == "turn/completed" and params.get("threadId") == thread_id:
+                            turn = params.get("turn") or {}
+                            if isinstance(turn.get("id"), str):
+                                completions[turn["id"]] = turn.get("status")
+                        if accepted_turn_id and accepted_turn_id in completions:
+                            status = completions[accepted_turn_id]
                             if status != "completed":
                                 raise RuntimeError("Codex preheat turn did not complete")
                             completed = True
+                            self.state["last_token_usage"] = by_turn.get(accepted_turn_id)
                             break
                 if not completed:
                     raise RuntimeError("Codex preheat turn incomplete")
@@ -320,7 +379,9 @@ class Preheater:
                 assessment = self._window_assessment(before, fresh)
                 self.state["last_window_assessment"] = assessment
                 self._record_decision(collector, "turn_completed", source=source,
-                                      window=assessment)
+                                      window=assessment, token_usage=self.state.get("last_token_usage"),
+                                      configured_model=self.preheat_model or None,
+                                      configured_effort=self.preheat_effort or None)
                 reset_at = (fresh.get("five_hour") or {}).get("reset_at_epoch")
                 self.state.update({"thread_id": thread_id, "last_turn_at": captured,
                                    "cooldown_until": reset_at if isinstance(reset_at, (int, float))
@@ -579,22 +640,40 @@ def create_app(collector, ingest_token=None):
         return web.json_response({"service": "xiaomiao-quota", "quota_ok": collector.snapshot()["usage"]["ok"],
                                   "mac_online": collector.performance()["ok"],
                                   "preheat_thread": bool(collector.preheater.state.get("thread_id"))})
+    def relay_authorized(request):
+        token_file = os.environ.get("PREHEAT_RELAY_TOKEN_FILE")
+        if not token_file:
+            return False
+        try:
+            token = Path(token_file).read_text().strip()
+        except OSError:
+            return False
+        return bool(token) and secrets.compare_digest(
+            request.headers.get("Authorization", "").encode(), ("Bearer " + token).encode())
+
     async def preheat(request):
-        allowed_ip = os.environ.get("PREHEAT_ALLOWED_IP", "192.168.1.159")
-        token_file = os.environ.get("PREHEAT_TOKEN_FILE")
-        token = Path(token_file).read_text().strip() if token_file else ""
-        supplied = request.headers.get("Authorization", "")
-        if (token and not secrets.compare_digest(supplied, "Bearer " + token)) or \
-                (not token and request.remote != allowed_ip):
+        relay_auth = relay_authorized(request)
+        if relay_auth and request.headers.get("X-Preheat-Guard") != "1":
             raise web.HTTPUnauthorized(text="Unauthorized")
-        return web.json_response(await collector.preheater.run(collector))
-    async def preheat_status(request):
         allowed_ip = os.environ.get("PREHEAT_ALLOWED_IP", "192.168.1.159")
         token_file = os.environ.get("PREHEAT_TOKEN_FILE")
         token = Path(token_file).read_text().strip() if token_file else ""
         supplied = request.headers.get("Authorization", "")
-        if (token and not secrets.compare_digest(supplied, "Bearer " + token)) or \
-                (not token and request.remote != allowed_ip):
+        legacy_auth = ((token and secrets.compare_digest(supplied, "Bearer " + token)) or
+                       (not token and request.remote == allowed_ip))
+        if not relay_auth and not legacy_auth:
+            raise web.HTTPUnauthorized(text="Unauthorized")
+        source = "remote" if request.headers.get("X-Preheat-Guard") == "1" else "manual"
+        return web.json_response(await collector.preheater.run(collector, source=source))
+    async def preheat_status(request):
+        relay_auth = relay_authorized(request)
+        allowed_ip = os.environ.get("PREHEAT_ALLOWED_IP", "192.168.1.159")
+        token_file = os.environ.get("PREHEAT_TOKEN_FILE")
+        token = Path(token_file).read_text().strip() if token_file else ""
+        supplied = request.headers.get("Authorization", "")
+        legacy_auth = ((token and secrets.compare_digest(supplied, "Bearer " + token)) or
+                       (not token and request.remote == allowed_ip))
+        if not relay_auth and not legacy_auth:
             raise web.HTTPUnauthorized(text="Unauthorized")
         return web.json_response(collector.preheater.status())
     async def ingest(request):
