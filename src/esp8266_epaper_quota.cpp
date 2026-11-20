@@ -10,13 +10,14 @@
 #include <ESP8266WiFi.h>
 #include <SPI.h>
 #include "xiaomiao_boot_config.h"
+#include "esp8266_epaper_quota_logic.h"
 
 namespace {
 constexpr uint8_t PIN_BUSY = D1, PIN_RESET = D4, PIN_DC = D2, PIN_CS = D8;
 constexpr uint16_t PANEL_WIDTH = 152, PANEL_HEIGHT = 296;
 constexpr size_t PLANE_BYTES = PANEL_WIDTH * PANEL_HEIGHT / 8;
-constexpr unsigned long POLL_MS = 5UL * 60UL * 1000UL;
-constexpr unsigned long REPAINT_MS = 24UL * 60UL * 60UL * 1000UL;
+constexpr unsigned long POLL_MS = 60UL * 1000UL;
+constexpr unsigned long MIN_REFRESH_MS = 3UL * 60UL * 1000UL;
 constexpr unsigned long BUSY_TIMEOUT_MS = 60000UL;
 #ifndef EPD_BUSY_LEVEL
 // Matches the supplied ESP8266 demo, NOT the conflicting panel PDF.
@@ -27,11 +28,7 @@ constexpr unsigned long BUSY_TIMEOUT_MS = 60000UL;
 #endif
 GFXcanvas1 canvas(PANEL_WIDTH, PANEL_HEIGHT);
 
-struct Quota {
-  bool valid = false;
-  int five = -1;
-  int weekly = -1;
-};
+using Quota = EpaperQuota;
 
 void sendByte(bool data, uint8_t value) {
   digitalWrite(PIN_CS, LOW);
@@ -101,20 +98,23 @@ void text(int x, int y, uint8_t size, const String &value) {
   canvas.setCursor(x, y); canvas.setTextSize(size); canvas.setTextColor(0);
   canvas.print(value);
 }
-void metric(int y, const char *name, int value) {
+void metric(int y, const char *name, int value, uint32_t resetEpoch) {
   text(8, y, 2, name);
-  text(196, y, 2, value >= 0 ? String(value) + "%" : "--");
-  canvas.drawRect(8, y + 22, 280, 12, 0);
-  if (value >= 0) canvas.fillRect(10, y + 24, value * 276 / 100, 8, 0);
+  String amount = value >= 0 ? String(value / 10) + "." + String(value % 10) + "%" : "--";
+  text(196, y, 2, amount);
+  char reset[12];
+  text(8, y + 19, 1, epaperResetTime(resetEpoch, reset, sizeof(reset)) ? String("RESET ") + reset : "RESET --");
+  canvas.drawRect(8, y + 29, 280, 10, 0);
+  if (value >= 0) canvas.fillRect(10, y + 31, value * 276 / 1000, 6, 0);
 }
 bool drawQuota(const Quota &quota) {
   if (!canvas.getBuffer()) { Serial.println(F("[EPD] allocation failed")); return false; }
   canvas.setRotation(1); canvas.fillScreen(1); canvas.setTextWrap(false);
   text(8, 5, 2, "CODEX QUOTA");
   text(214, 8, 1, quota.valid ? "ONLINE" : "OFFLINE");
-  metric(32, "5 HOURS", quota.five);
-  metric(78, "WEEK", quota.weekly);
-  text(8, 135, 1, "LAN / 5 MIN POLL");
+  metric(27, "5 HOURS", quota.fiveTenths, quota.fiveResetEpoch);
+  metric(78, "WEEK", quota.weeklyTenths, quota.weeklyResetEpoch);
+  text(8, 135, 1, "RESET: CHINA TIME");
   return panelDisplay();
 }
 
@@ -122,7 +122,14 @@ int remaining(JsonVariantConst window) {
   if (!window.is<JsonObjectConst>() || !window["remaining_percent"].is<float>()) return -1;
   float value = window["remaining_percent"].as<float>();
   if (!isfinite(value) || value < 0 || value > 100) return -1;
-  return int(value + 0.5f);
+  return int(value * 10.0f + 0.5f);
+}
+
+uint32_t resetEpoch(JsonVariantConst window) {
+  if (!window.is<JsonObjectConst>() || !window["reset_at_epoch"].is<double>()) return 0;
+  double value = window["reset_at_epoch"].as<double>();
+  if (!isfinite(value) || value < 946684800.0 || value > 4294967295.0) return 0;
+  return uint32_t(value);
 }
 
 Quota readQuota() {
@@ -138,9 +145,11 @@ Quota readQuota() {
   if (status == HTTP_CODE_OK && length >= 0 && length <= 8192) {
     DynamicJsonDocument doc(8192);
     if (!deserializeJson(doc, http.getStream()) && doc["ok"].as<bool>() && !doc["stale"].as<bool>()) {
-      out.five = remaining(doc["five_hour"]);
-      out.weekly = remaining(doc["weekly"]);
-      out.valid = out.five >= 0 || out.weekly >= 0;
+      out.fiveTenths = remaining(doc["five_hour"]);
+      out.weeklyTenths = remaining(doc["weekly"]);
+      out.valid = out.fiveTenths >= 0 || out.weeklyTenths >= 0;
+      if (out.fiveTenths >= 0) out.fiveResetEpoch = resetEpoch(doc["five_hour"]);
+      if (out.weeklyTenths >= 0) out.weeklyResetEpoch = resetEpoch(doc["weekly"]);
     }
   }
   http.end();
@@ -207,8 +216,8 @@ void loop() {
     if (!cleaningComplete) { delay(50); return; }
   }
 #endif
-  static bool first = true, lastPaintOk = false;
-  static unsigned long lastPoll = 0, lastPaint = 0;
+  static bool first = true, hasPainted = false, hasAttempted = false;
+  static unsigned long lastPoll = 0, lastAttempt = 0;
   static Quota previous;
   unsigned long now = millis();
   if (!first && now - lastPoll < POLL_MS) { delay(100); return; }
@@ -216,10 +225,12 @@ void loop() {
   ensureWifi();
   Quota quota = readQuota();
   if (!quota.valid) lastPoll = now - POLL_MS + 30000UL;
-  bool changed = first || quota.valid != previous.valid || quota.five != previous.five || quota.weekly != previous.weekly;
-  if (changed || !lastPaintOk || now - lastPaint >= REPAINT_MS) {
-    lastPaintOk = drawQuota(quota);
-    if (lastPaintOk) { lastPaint = now; previous = quota; }
+  now = millis();
+  if (epaperRefreshDue(hasPainted, hasAttempted, now, lastAttempt, MIN_REFRESH_MS, quota, previous)) {
+    hasAttempted = true;
+    bool painted = drawQuota(quota);
+    lastAttempt = millis(); // Minimum interval begins after refresh completes.
+    if (painted) { previous = quota; hasPainted = true; }
   }
   first = false;
 }
