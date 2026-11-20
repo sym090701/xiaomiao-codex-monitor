@@ -109,8 +109,9 @@ class Preheater:
             "PREHEAT_AUTO_MIN_EVENTS", "3")))
         self.turn_timeout_seconds = max(90, int(os.environ.get(
             "PREHEAT_TURN_TIMEOUT_SECONDS", "180")))
-        # Empty means the persisted thread's current model, preserving existing behavior.
-        self.preheat_model = os.environ.get("PREHEAT_MODEL", "").strip()
+        # Explicit setting takes precedence; a probe may persist a safety pin.
+        self.preheat_model = (os.environ.get("PREHEAT_MODEL", "").strip() or
+                              str(self.state.get("preheat_safety_model") or ""))
         self.preheat_effort = os.environ.get("PREHEAT_REASONING_EFFORT", "").strip()
         self.preheat_standard_tier = os.environ.get("PREHEAT_STANDARD_TIER", "0") == "1"
         self._prediction_cache = None
