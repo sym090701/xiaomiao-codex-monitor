@@ -7,18 +7,24 @@
 #include <Adafruit_GFX.h>
 #include <ArduinoJson.h>
 #include <ESP8266HTTPClient.h>
+#include <ESP8266HTTPUpdateServer.h>
+#include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
+#include <ESP8266mDNS.h>
 #include <SPI.h>
 #include "xiaomiao_boot_config.h"
 #include "esp8266_epaper_quota_logic.h"
 
 namespace {
 constexpr uint8_t PIN_BUSY = D1, PIN_RESET = D4, PIN_DC = D2, PIN_CS = D8;
+// NodeMCU/Waveshare ESP8266 BOOT/FLASH key: GPIO0 (D3), active low.
+constexpr uint8_t PIN_BOOT = D3;
 constexpr uint16_t PANEL_WIDTH = 152, PANEL_HEIGHT = 296;
 constexpr size_t PLANE_BYTES = PANEL_WIDTH * PANEL_HEIGHT / 8;
 constexpr unsigned long POLL_MS = 60UL * 1000UL;
 constexpr unsigned long MIN_REFRESH_MS = 3UL * 60UL * 1000UL;
 constexpr unsigned long BUSY_TIMEOUT_MS = 60000UL;
+constexpr unsigned long BOOT_CLEAR_HOLD_MS = 2000UL;
 #ifndef EPD_BUSY_LEVEL
 // Matches the supplied ESP8266 demo, NOT the conflicting panel PDF.
 #define EPD_BUSY_LEVEL LOW
@@ -27,6 +33,8 @@ constexpr unsigned long BUSY_TIMEOUT_MS = 60000UL;
 #define EPD_ALLOW_UNVERIFIED_DRIVER 0
 #endif
 GFXcanvas1 canvas(PANEL_WIDTH, PANEL_HEIGHT);
+ESP8266WebServer otaServer(80);
+ESP8266HTTPUpdateServer httpUpdater;
 
 using Quota = EpaperQuota;
 
@@ -92,6 +100,16 @@ bool panelDisplay() {
   Serial.println(F("[EPD] refresh complete, panel asleep"));
   return true;
 #endif
+}
+
+bool clearPanel() {
+  if (!canvas.getBuffer()) return false;
+  Serial.println(F("[CLEAN] BOOT long-press: white full refresh"));
+  canvas.setRotation(1);
+  canvas.fillScreen(1);
+  if (!panelDisplay()) return false;
+  Serial.println(F("[CLEAN] complete"));
+  return true;
 }
 
 void text(int x, int y, uint8_t size, const String &value) {
@@ -167,11 +185,29 @@ void ensureWifi() {
   if (WiFi.status() == WL_CONNECTED) Serial.println(F("[WiFi] connected"));
   else Serial.println(F("[WiFi] not connected"));
 }
+
+void startOta() {
+  otaServer.on("/", HTTP_GET, []() {
+    if (!otaServer.authenticate(XM_EPD_OTA_USER, XM_EPD_OTA_PASSWORD)) {
+      return otaServer.requestAuthentication();
+    }
+    otaServer.send(200, "text/plain", "ESP8266 quota e-paper OTA: POST /update");
+  });
+  httpUpdater.setup(&otaServer, "/update", XM_EPD_OTA_USER, XM_EPD_OTA_PASSWORD);
+  otaServer.begin();
+  if (MDNS.begin("codex-epaper")) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.println(F("[OTA] http://codex-epaper.local/update"));
+  } else {
+    Serial.println(F("[OTA] mDNS unavailable; use device IP /update"));
+  }
+}
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
   pinMode(PIN_BUSY, INPUT);
+  pinMode(PIN_BOOT, INPUT_PULLUP);
   pinMode(PIN_RESET, OUTPUT); pinMode(PIN_DC, OUTPUT); pinMode(PIN_CS, OUTPUT);
   digitalWrite(PIN_CS, HIGH); digitalWrite(PIN_RESET, HIGH);
   SPI.begin(); WiFi.mode(WIFI_STA);
@@ -218,11 +254,48 @@ void loop() {
 #endif
   static bool first = true, hasPainted = false, hasAttempted = false;
   static unsigned long lastPoll = 0, lastAttempt = 0;
+  static unsigned long bootPressedAt = 0;
+  static bool bootClearHandled = false;
+  static bool otaStarted = false;
   static Quota previous;
   unsigned long now = millis();
+
+  // Keep the HTTP OTA endpoint responsive between e-paper refreshes.  The
+  // upload is authenticated and a reboot is performed by the updater only
+  // after the image has been fully verified.
+  otaServer.handleClient();
+  MDNS.update();
+
+  bool bootPressed = digitalRead(PIN_BOOT) == LOW;
+  if (bootPressed) {
+    if (!bootPressedAt) bootPressedAt = now;
+    if (!bootClearHandled && now - bootPressedAt >= BOOT_CLEAR_HOLD_MS) {
+      bootClearHandled = true;
+      if (clearPanel()) {
+        // Keep the panel white until the next normal poll.  This makes the
+        // long-press action observable instead of immediately repainting the
+        // same quota frame in the same loop iteration.
+        hasPainted = true;
+        hasAttempted = true;
+        previous = Quota{};
+        lastAttempt = now;
+        lastPoll = now;
+        first = false;
+        return;
+      }
+    }
+  } else {
+    bootPressedAt = 0;
+    bootClearHandled = false;
+  }
+
   if (!first && now - lastPoll < POLL_MS) { delay(100); return; }
   lastPoll = now;
   ensureWifi();
+  if (WiFi.status() == WL_CONNECTED && !otaStarted) {
+    startOta();
+    otaStarted = true;
+  }
   Quota quota = readQuota();
   if (!quota.valid) lastPoll = now - POLL_MS + 30000UL;
   now = millis();

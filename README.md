@@ -26,6 +26,27 @@ Ubuntu 可持续采集额度，Mac agent 将 Mac 性能上报至同一服务器�
 
 小喵原机背光没有本移植可控制的 PWM 引脚，因此网页里的亮度设置不会调节掌机背光。
 
+## ESP8266 墨水屏版：OTA 与 BOOT 清屏
+
+仓库也包含给 Waveshare ESP8266 驱动板 + SE2266FS092 296×152 三色屏使用的额度固件，构建环境为
+`esp8266_epaper_quota`。该版本的 OTA 和按键行为如下：
+
+- 设备连上配置的 Wi-Fi 后，在 `http://codex-epaper.local/update` 提供带 Basic Auth 的网页 OTA；
+  `.local` 不可用时，使用串口日志显示的设备 IP 加 `/update`。
+- OTA 用户名和密码只从本机未跟踪的 `ota.local.json` 读取，并嵌入私有构建产物；不要把该文件、生成的私有 BIN
+  或 `.pio/build/esp8266_epaper_quota/xiaomiao_boot_config.h` 提交到 GitHub。
+- 上传时保持 USB 供电，不要在墨水屏刷新期间断电。网页上传完成并校验后设备自动重启；OTA 服务只在联网后启动。
+- 驱动板的 BOOT/FLASH 键是 D3/GPIO0，低电平有效。长按约 2 秒会执行一次全白全刷，完成后重新获取并显示额度。
+  短按不会清屏；清屏期间不要拔 USB 或屏幕排线。
+
+构建：
+
+```bash
+PLATFORMIO_CORE_DIR="$PWD/.pio/sandbox-core" pio run -e esp8266_epaper_quota
+```
+
+首次安装仍建议通过 USB 刷入；后续可使用 `/update` 上传同一环境生成的 BIN。该屏幕刷新较慢，OTA 上传期间无法同时刷新墨水屏。
+
 ## NAS 趋势页
 
 趋势页的数据由 NAS 读取归档文件后提供给小喵，默认接口为
