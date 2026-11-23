@@ -24,7 +24,11 @@ constexpr size_t PLANE_BYTES = PANEL_WIDTH * PANEL_HEIGHT / 8;
 constexpr unsigned long POLL_MS = 60UL * 1000UL;
 constexpr unsigned long MIN_REFRESH_MS = 3UL * 60UL * 1000UL;
 constexpr unsigned long BUSY_TIMEOUT_MS = 60000UL;
-constexpr unsigned long BOOT_CLEAR_HOLD_MS = 2000UL;
+// Match the photo-frame firmware's FLASH-button semantics: debounce first,
+// indicate the long-press threshold, and execute only after release.
+constexpr unsigned long BOOT_DEBOUNCE_MS = 40UL;
+constexpr unsigned long BOOT_CLEAR_HOLD_MS = 5000UL;
+constexpr unsigned long BOOT_INDICATE_MS = 1500UL;
 #ifndef EPD_BUSY_LEVEL
 // Matches the supplied ESP8266 demo, NOT the conflicting panel PDF.
 #define EPD_BUSY_LEVEL LOW
@@ -110,6 +114,60 @@ bool clearPanel() {
   if (!panelDisplay()) return false;
   Serial.println(F("[CLEAN] complete"));
   return true;
+}
+
+void pollBootButton(bool busy, bool &clearQueued) {
+  static bool rawState = HIGH;
+  static bool stableState = HIGH;
+  static bool wasPressed = false;
+  static bool indicateLong = false;
+  static bool indicateClear = false;
+  static unsigned long changedAt = 0;
+  static unsigned long pressedAt = 0;
+  const unsigned long now = millis();
+  const bool raw = digitalRead(PIN_BOOT);
+  if (raw != rawState) {
+    rawState = raw;
+    changedAt = now;
+  }
+  if (now - changedAt >= BOOT_DEBOUNCE_MS && raw != stableState) {
+    stableState = raw;
+    if (stableState == LOW) {
+      wasPressed = true;
+      indicateLong = false;
+      indicateClear = false;
+      pressedAt = now;
+    } else if (wasPressed) {
+      const unsigned long heldMs = now - pressedAt;
+      wasPressed = false;
+      indicateLong = false;
+      indicateClear = false;
+      digitalWrite(LED_BUILTIN, HIGH);
+      if (busy) {
+        Serial.println(F("[CLEAN] BOOT release ignored while display is busy"));
+      } else if (heldMs >= BOOT_CLEAR_HOLD_MS) {
+        clearQueued = true;
+        Serial.println(F("[CLEAN] BOOT extra-long press; white clear queued"));
+      } else {
+        Serial.println(F("[CLEAN] BOOT press released; no clear"));
+      }
+    }
+  }
+  const unsigned long heldMs = now - pressedAt;
+  if (wasPressed && stableState == LOW && !indicateLong &&
+      heldMs >= BOOT_INDICATE_MS) {
+    indicateLong = true;
+    digitalWrite(LED_BUILTIN, LOW);
+    Serial.println(F("[CLEAN] BOOT long-press threshold reached"));
+  }
+  if (wasPressed && stableState == LOW && !indicateClear &&
+      heldMs >= BOOT_CLEAR_HOLD_MS) {
+    indicateClear = true;
+    Serial.println(F("[CLEAN] BOOT clear threshold reached; release to run"));
+  }
+  if (wasPressed && indicateClear) {
+    digitalWrite(LED_BUILTIN, ((heldMs / 150UL) & 1UL) ? LOW : HIGH);
+  }
 }
 
 void text(int x, int y, uint8_t size, const String &value) {
@@ -208,7 +266,9 @@ void setup() {
   Serial.begin(115200);
   pinMode(PIN_BUSY, INPUT);
   pinMode(PIN_BOOT, INPUT_PULLUP);
+  pinMode(LED_BUILTIN, OUTPUT);
   pinMode(PIN_RESET, OUTPUT); pinMode(PIN_DC, OUTPUT); pinMode(PIN_CS, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);
   digitalWrite(PIN_CS, HIGH); digitalWrite(PIN_RESET, HIGH);
   SPI.begin(); WiFi.mode(WIFI_STA);
 }
@@ -254,9 +314,8 @@ void loop() {
 #endif
   static bool first = true, hasPainted = false, hasAttempted = false;
   static unsigned long lastPoll = 0, lastAttempt = 0;
-  static unsigned long bootPressedAt = 0;
-  static bool bootClearHandled = false;
   static bool otaStarted = false;
+  static bool clearQueued = false;
   static Quota previous;
   unsigned long now = millis();
 
@@ -266,27 +325,20 @@ void loop() {
   otaServer.handleClient();
   MDNS.update();
 
-  bool bootPressed = digitalRead(PIN_BOOT) == LOW;
-  if (bootPressed) {
-    if (!bootPressedAt) bootPressedAt = now;
-    if (!bootClearHandled && now - bootPressedAt >= BOOT_CLEAR_HOLD_MS) {
-      bootClearHandled = true;
-      if (clearPanel()) {
-        // Keep the panel white until the next normal poll.  This makes the
-        // long-press action observable instead of immediately repainting the
-        // same quota frame in the same loop iteration.
-        hasPainted = true;
-        hasAttempted = true;
-        previous = Quota{};
-        lastAttempt = now;
-        lastPoll = now;
-        first = false;
-        return;
-      }
+  pollBootButton(false, clearQueued);
+  if (clearQueued) {
+    clearQueued = false;
+    if (clearPanel()) {
+      // Keep the panel white until the next normal poll.  This makes the
+      // release-triggered action observable instead of repainting immediately.
+      hasPainted = true;
+      hasAttempted = true;
+      previous = Quota{};
+      lastAttempt = now;
+      lastPoll = now;
+      first = false;
+      return;
     }
-  } else {
-    bootPressedAt = 0;
-    bootClearHandled = false;
   }
 
   if (!first && now - lastPoll < POLL_MS) { delay(100); return; }
