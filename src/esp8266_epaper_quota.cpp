@@ -22,7 +22,9 @@ constexpr uint8_t PIN_BOOT = D3;
 constexpr uint16_t PANEL_WIDTH = 152, PANEL_HEIGHT = 296;
 constexpr size_t PLANE_BYTES = PANEL_WIDTH * PANEL_HEIGHT / 8;
 constexpr unsigned long POLL_MS = 60UL * 1000UL;
-constexpr unsigned long MIN_REFRESH_MS = 3UL * 60UL * 1000UL;
+// No artificial minimum interval: a changed quota snapshot is displayed on
+// the next poll. Unchanged snapshots are still suppressed by the logic layer.
+constexpr unsigned long MIN_REFRESH_MS = 0UL;
 constexpr unsigned long BUSY_TIMEOUT_MS = 60000UL;
 // Match the requested FLASH-button semantics: debounce first, then trigger
 // the white refresh at the long-press threshold while the LED stays on.
