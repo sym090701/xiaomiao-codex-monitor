@@ -24,10 +24,9 @@ constexpr size_t PLANE_BYTES = PANEL_WIDTH * PANEL_HEIGHT / 8;
 constexpr unsigned long POLL_MS = 60UL * 1000UL;
 constexpr unsigned long MIN_REFRESH_MS = 3UL * 60UL * 1000UL;
 constexpr unsigned long BUSY_TIMEOUT_MS = 60000UL;
-// Match the photo-frame firmware's FLASH-button semantics: debounce first,
-// indicate the long-press threshold, and execute only after release.
+// Match the requested FLASH-button semantics: debounce first, then trigger
+// the white refresh at the long-press threshold while the LED stays on.
 constexpr unsigned long BOOT_DEBOUNCE_MS = 40UL;
-constexpr unsigned long BOOT_CLEAR_HOLD_MS = 5000UL;
 constexpr unsigned long BOOT_INDICATE_MS = 1500UL;
 #ifndef EPD_BUSY_LEVEL
 // Matches the supplied ESP8266 demo, NOT the conflicting panel PDF.
@@ -121,7 +120,7 @@ void pollBootButton(bool busy, bool &clearQueued) {
   static bool stableState = HIGH;
   static bool wasPressed = false;
   static bool indicateLong = false;
-  static bool indicateClear = false;
+  static bool clearTriggered = false;
   static unsigned long changedAt = 0;
   static unsigned long pressedAt = 0;
   const unsigned long now = millis();
@@ -135,19 +134,19 @@ void pollBootButton(bool busy, bool &clearQueued) {
     if (stableState == LOW) {
       wasPressed = true;
       indicateLong = false;
-      indicateClear = false;
+      clearTriggered = false;
       pressedAt = now;
     } else if (wasPressed) {
       const unsigned long heldMs = now - pressedAt;
       wasPressed = false;
       indicateLong = false;
-      indicateClear = false;
       digitalWrite(LED_BUILTIN, HIGH);
       if (busy) {
         Serial.println(F("[CLEAN] BOOT release ignored while display is busy"));
-      } else if (heldMs >= BOOT_CLEAR_HOLD_MS) {
+      } else if (heldMs >= BOOT_INDICATE_MS && !clearTriggered) {
+        clearTriggered = true;
         clearQueued = true;
-        Serial.println(F("[CLEAN] BOOT extra-long press; white clear queued"));
+        Serial.println(F("[CLEAN] BOOT released; white clear queued"));
       } else {
         Serial.println(F("[CLEAN] BOOT press released; no clear"));
       }
@@ -157,16 +156,8 @@ void pollBootButton(bool busy, bool &clearQueued) {
   if (wasPressed && stableState == LOW && !indicateLong &&
       heldMs >= BOOT_INDICATE_MS) {
     indicateLong = true;
-    digitalWrite(LED_BUILTIN, LOW);
-    Serial.println(F("[CLEAN] BOOT long-press threshold reached"));
-  }
-  if (wasPressed && stableState == LOW && !indicateClear &&
-      heldMs >= BOOT_CLEAR_HOLD_MS) {
-    indicateClear = true;
-    Serial.println(F("[CLEAN] BOOT clear threshold reached; release to run"));
-  }
-  if (wasPressed && indicateClear) {
-    digitalWrite(LED_BUILTIN, ((heldMs / 150UL) & 1UL) ? LOW : HIGH);
+    digitalWrite(LED_BUILTIN, LOW); // ESP8266 onboard LED is active-low.
+    Serial.println(F("[CLEAN] BOOT 1.5s threshold reached; release to clear"));
   }
 }
 
