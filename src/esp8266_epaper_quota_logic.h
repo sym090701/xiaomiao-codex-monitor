@@ -9,6 +9,9 @@ struct EpaperQuota {
   int weeklyTenths = -1;
   uint32_t fiveResetEpoch = 0;
   uint32_t weeklyResetEpoch = 0;
+  // Timestamp supplied by the quota server for the snapshot that was drawn.
+  // It is display metadata and intentionally does not trigger a refresh.
+  uint32_t updatedEpoch = 0;
 };
 
 inline bool epaperQuotaChanged(const EpaperQuota &a, const EpaperQuota &b) {

@@ -176,6 +176,10 @@ void metric(int y, const char *name, int value, uint32_t resetEpoch) {
   canvas.drawRect(8, y + 29, 280, 10, 0);
   if (value >= 0) canvas.fillRect(10, y + 31, value * 276 / 1000, 6, 0);
 }
+String updatedLabel(uint32_t epoch) {
+  char stamp[12];
+  return epaperResetTime(epoch, stamp, sizeof(stamp)) ? String("LAST ") + stamp : "LAST --";
+}
 bool drawQuota(const Quota &quota) {
   if (!canvas.getBuffer()) { Serial.println(F("[EPD] allocation failed")); return false; }
   canvas.setRotation(1); canvas.fillScreen(1); canvas.setTextWrap(false);
@@ -183,7 +187,7 @@ bool drawQuota(const Quota &quota) {
   text(214, 8, 1, quota.valid ? "ONLINE" : "OFFLINE");
   metric(27, "5 HOURS", quota.fiveTenths, quota.fiveResetEpoch);
   metric(78, "WEEK", quota.weeklyTenths, quota.weeklyResetEpoch);
-  text(8, 135, 1, "RESET: CHINA TIME");
+  text(8, 135, 1, updatedLabel(quota.updatedEpoch));
   return panelDisplay();
 }
 
@@ -199,6 +203,13 @@ uint32_t resetEpoch(JsonVariantConst window) {
   double value = window["reset_at_epoch"].as<double>();
   if (!isfinite(value) || value < 946684800.0 || value > 4294967295.0) return 0;
   return uint32_t(value);
+}
+
+uint32_t epochValue(JsonVariantConst value) {
+  if (!value.is<double>()) return 0;
+  double number = value.as<double>();
+  if (!isfinite(number) || number < 946684800.0 || number > 4294967295.0) return 0;
+  return uint32_t(number);
 }
 
 Quota readQuota() {
@@ -217,6 +228,7 @@ Quota readQuota() {
       out.fiveTenths = remaining(doc["five_hour"]);
       out.weeklyTenths = remaining(doc["weekly"]);
       out.valid = out.fiveTenths >= 0 || out.weeklyTenths >= 0;
+      out.updatedEpoch = epochValue(doc["server_updated_epoch"]);
       if (out.fiveTenths >= 0) out.fiveResetEpoch = resetEpoch(doc["five_hour"]);
       if (out.weeklyTenths >= 0) out.weeklyResetEpoch = resetEpoch(doc["weekly"]);
     }
