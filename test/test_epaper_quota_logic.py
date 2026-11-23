@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 class EpaperQuotaLogicTest(unittest.TestCase):
-    def test_reset_time_change_detection_and_throttle(self):
+    def test_reset_time_change_detection_and_one_minute_throttle(self):
         compiler = shutil.which("c++")
         if not compiler:
             self.skipTest("C++ compiler unavailable")

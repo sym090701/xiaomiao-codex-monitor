@@ -12,9 +12,18 @@ struct EpaperQuota {
 };
 
 inline bool epaperQuotaChanged(const EpaperQuota &a, const EpaperQuota &b) {
+  // A full window has just reset when its remaining value is 100.0%. The
+  // service may still return a moving reset timestamp while that window is
+  // full; that timestamp alone should not cause an e-paper refresh.
+  const bool fiveResetChanged =
+      a.fiveResetEpoch != b.fiveResetEpoch &&
+      !(a.fiveTenths == 1000 && b.fiveTenths == 1000);
+  const bool weeklyResetChanged =
+      a.weeklyResetEpoch != b.weeklyResetEpoch &&
+      !(a.weeklyTenths == 1000 && b.weeklyTenths == 1000);
   return a.valid != b.valid || a.fiveTenths != b.fiveTenths ||
-         a.weeklyTenths != b.weeklyTenths || a.fiveResetEpoch != b.fiveResetEpoch ||
-         a.weeklyResetEpoch != b.weeklyResetEpoch;
+         a.weeklyTenths != b.weeklyTenths || fiveResetChanged ||
+         weeklyResetChanged;
 }
 
 inline bool epaperRefreshDue(bool hasPainted, bool hasAttempted, uint32_t now,

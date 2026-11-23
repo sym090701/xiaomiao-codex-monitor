@@ -19,15 +19,26 @@ int main() {
   before.weeklyResetEpoch = 1704672000;
   next = before;
   assert(!epaperQuotaChanged(before, next));
-  assert(!epaperRefreshDue(true, true, 1000000, 0, 180000, next, before));
+  assert(!epaperRefreshDue(true, true, 1000000, 0, 60000, next, before));
   next.fiveTenths++;
   assert(epaperQuotaChanged(before, next));
-  assert(!epaperRefreshDue(true, true, 179999, 0, 180000, next, before));
-  assert(epaperRefreshDue(true, true, 180000, 0, 180000, next, before));
-  assert(epaperRefreshDue(false, false, 0, 0, 180000, next, before));
+  assert(!epaperRefreshDue(true, true, 59999, 0, 60000, next, before));
+  assert(epaperRefreshDue(true, true, 60000, 0, 60000, next, before));
+  assert(epaperRefreshDue(false, false, 0, 0, 60000, next, before));
   next = before; next.fiveResetEpoch++;
   assert(epaperQuotaChanged(before, next));
   next = before; next.weeklyResetEpoch++;
+  assert(epaperQuotaChanged(before, next));
+  EpaperQuota full = before;
+  full.fiveTenths = 1000;
+  full.weeklyTenths = 1000;
+  next = full; next.fiveResetEpoch++;
+  assert(!epaperQuotaChanged(full, next));
+  next = full; next.weeklyResetEpoch++;
+  assert(!epaperQuotaChanged(full, next));
+  next = before; next.fiveTenths = 999; next.fiveResetEpoch++;
+  assert(epaperQuotaChanged(before, next));
+  next = before; next.weeklyTenths = 999; next.weeklyResetEpoch++;
   assert(epaperQuotaChanged(before, next));
   next = before; next.valid = false;
   assert(epaperQuotaChanged(before, next));
@@ -35,6 +46,6 @@ int main() {
   assert(epaperQuotaChanged(before, next));
   // millis() wraps at 2^32; subtraction must remain well-defined.
   next = before; next.fiveTenths++;
-  assert(epaperRefreshDue(true, true, 179500U, 0xfffffe0bU, 180000U, next, before));
+  assert(epaperRefreshDue(true, true, 59500U, 0xfffffe0bU, 60000U, next, before));
   return 0;
 }
